@@ -1,0 +1,29 @@
+.app {
+  font-family: system-ui, sans-serif;
+  color: #eee;
+  background: #0f0f1a;
+  min-height: 100vh;
+  padding: 2rem;
+  text-align: center;
+}
+
+.status {
+  color: #999;
+  margin-bottom: 1rem;
+}
+
+.webcam {
+  width: 640px;
+  max-width: 90vw;
+  border-radius: 12px;
+  transform: scaleX(-1);
+}
+
+.state-readout {
+  margin-top: 1rem;
+  font-family: monospace;
+  background: #1a1a2e;
+  padding: 0.75rem 1rem;
+  border-radius: 8px;
+  display: inline-block;
+}
