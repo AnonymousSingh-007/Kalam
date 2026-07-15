@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import { HandTracker } from './hand/handTracker'
 import { countFingers } from './hand/fingerCount'
 import { CountdownMachine } from './state/countdownMachine'
+import { runPhysicsTest } from './physics/rocketPhysics.test'
 import type { CountdownState } from './types'
 import './App.css'
 
@@ -52,6 +53,8 @@ function App() {
       }
       rafRef.current = requestAnimationFrame(loop)
     }
+    
+    runPhysicsTest()
 
     setup().catch((err) => setStatus(`Error: ${err.message}`))
 
