@@ -13,6 +13,7 @@ function App() {
   const rafRef = useRef<number>(0)
   const [state, setState] = useState<CountdownState>(machine.getState())
   const [status, setStatus] = useState('Loading model...')
+  const [debug, setDebug] = useState('')
 
   useEffect(() => {
     machine.onChange(setState)
@@ -44,6 +45,9 @@ function App() {
       if (video && tracker && tracker.isReady() && video.readyState >= 2) {
         const hands = tracker.detect(video, performance.now())
         const reading = hands.length > 0 ? countFingers(hands[0]) : null
+        setDebug(
+          `hands detected: ${hands.length} | score: ${hands[0]?.score?.toFixed(2) ?? 'n/a'} | handedness: ${hands[0]?.handedness ?? 'n/a'} | reading: ${reading}`
+        )
         machine.tick(reading)
       }
       rafRef.current = requestAnimationFrame(loop)
@@ -66,6 +70,7 @@ function App() {
       <div className="state-readout">
         <strong>State:</strong> {JSON.stringify(state)}
       </div>
+      <div className="state-readout">{debug}</div>
     </div>
   )
 }
