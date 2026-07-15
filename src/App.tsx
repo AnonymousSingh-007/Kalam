@@ -2,7 +2,10 @@ import { useEffect, useRef, useState } from 'react'
 import { HandTracker } from './hand/handTracker'
 import { countFingers } from './hand/fingerCount'
 import { CountdownMachine } from './state/countdownMachine'
-import type { CountdownState } from './types'
+import { RocketPhysicsEngine } from './physics/rocketPhysics'
+import { ParamPanel } from './ui/ParamPanel'
+import { Scene } from './render/Scene'
+import type { CountdownState, Telemetry, RocketParams } from './types'
 import './App.css'
 
 const machine = new CountdownMachine()
@@ -10,10 +13,15 @@ const machine = new CountdownMachine()
 function App() {
   const videoRef = useRef<HTMLVideoElement>(null)
   const trackerRef = useRef<HandTracker | null>(null)
+  const engineRef = useRef<RocketPhysicsEngine | null>(null)
+  const telemetryRef = useRef<Telemetry | null>(null)
   const rafRef = useRef<number>(0)
+  const lastTimeRef = useRef<number>(0)
+
   const [state, setState] = useState<CountdownState>(machine.getState())
   const [status, setStatus] = useState('Loading model...')
   const [debug, setDebug] = useState('')
+  const [launched, setLaunched] = useState(false)
 
   useEffect(() => {
     machine.onChange(setState)
@@ -39,7 +47,7 @@ function App() {
       loop()
     }
 
-    function loop() {
+    function loop(timestamp?: number) {
       const video = videoRef.current
       const tracker = trackerRef.current
       if (video && tracker && tracker.isReady() && video.readyState >= 2) {
@@ -50,6 +58,14 @@ function App() {
         )
         machine.tick(reading)
       }
+
+      // Physics step, only once armed/launched engine exists
+      if (engineRef.current && timestamp !== undefined) {
+        const dt = lastTimeRef.current ? (timestamp - lastTimeRef.current) / 1000 : 1 / 60
+        lastTimeRef.current = timestamp
+        telemetryRef.current = engineRef.current.step(Math.min(dt, 1 / 30))
+      }
+
       rafRef.current = requestAnimationFrame(loop)
     }
 
@@ -62,15 +78,29 @@ function App() {
     }
   }, [])
 
+  // React to countdown machine reaching 'armed' -> wait for explicit launch param submit
+  // Launch button in ParamPanel triggers actual physics + rocket launch
+  function handleLaunch(params: RocketParams) {
+    if (state.phase !== 'armed') return
+    const engine = new RocketPhysicsEngine(params)
+    engine.launch()
+    engineRef.current = engine
+    lastTimeRef.current = 0
+    machine.launch()
+    setLaunched(true)
+  }
+
   return (
     <div className="app">
       <h1>Kalam</h1>
       <p className="status">{status}</p>
-      <video ref={videoRef} className="webcam" muted playsInline />
+      <video ref={videoRef} className="webcam" muted playsInline style={{ display: 'none' }} />
+      <Scene telemetryRef={telemetryRef} launched={launched} />
       <div className="state-readout">
         <strong>State:</strong> {JSON.stringify(state)}
       </div>
       <div className="state-readout">{debug}</div>
+      <ParamPanel onLaunch={handleLaunch} disabled={state.phase !== 'armed'} />
     </div>
   )
 }
