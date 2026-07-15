@@ -21,3 +21,24 @@ export type CountdownState =
   | { phase: 'counting'; expected: FingerCount; heldFrames: number }
   | { phase: 'armed' }
   | { phase: 'launched' }
+
+  // Phase 2: Rocket physics
+export interface RocketParams {
+  thrust: number // Newtons
+  dryMass: number // kg — rocket structure, no fuel
+  propellantMass: number // kg — fuel at launch
+  burnRate: number // kg/s — propellant consumed per second
+  dragCoefficient: number // unitless, typical rockets ~0.3-0.75
+  crossSectionArea: number // m^2 — frontal area for drag calc
+}
+
+export type FlightStage = 'pre-launch' | 'powered-ascent' | 'coast' | 'apogee' | 'descent'
+
+export interface Telemetry {
+  time: number // seconds since launch
+  altitude: number // meters
+  velocity: number // m/s, positive = up
+  acceleration: number // m/s^2
+  mass: number // kg, current total mass
+  stage: FlightStage
+}
