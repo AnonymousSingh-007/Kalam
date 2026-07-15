@@ -27,3 +27,52 @@
   border-radius: 8px;
   display: inline-block;
 }
+
+.param-panel {
+  margin-top: 1.5rem;
+  background: #1a1a2e;
+  padding: 1rem 1.5rem;
+  border-radius: 12px;
+  display: inline-block;
+  text-align: left;
+}
+
+.param-panel h2 {
+  margin-top: 0;
+  font-size: 1rem;
+  color: #ccc;
+}
+
+.param-panel label {
+  display: block;
+  margin-bottom: 0.5rem;
+  font-size: 0.85rem;
+  color: #aaa;
+}
+
+.param-panel input {
+  display: block;
+  width: 100%;
+  margin-top: 2px;
+  padding: 4px 6px;
+  background: #0f0f1a;
+  border: 1px solid #333;
+  color: #eee;
+  border-radius: 4px;
+}
+
+.param-panel button {
+  margin-top: 0.75rem;
+  padding: 8px 16px;
+  background: #e94560;
+  color: white;
+  border: none;
+  border-radius: 6px;
+  cursor: pointer;
+  font-weight: 600;
+}
+
+.param-panel button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
