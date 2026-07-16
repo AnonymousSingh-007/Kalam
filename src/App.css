@@ -30,49 +30,71 @@
 
 .param-panel {
   margin-top: 1.5rem;
-  background: #1a1a2e;
-  padding: 1rem 1.5rem;
-  border-radius: 12px;
+  background: #12141c;
+  border: 1px solid #2a2d3a;
+  padding: 1.25rem 1.5rem;
+  border-radius: 4px;
   display: inline-block;
   text-align: left;
+  font-family: 'Courier New', monospace;
+  box-shadow: 0 0 0 1px rgba(255, 145, 0, 0.08);
 }
 
 .param-panel h2 {
-  margin-top: 0;
-  font-size: 1rem;
-  color: #ccc;
+  margin: 0 0 1rem 0;
+  font-size: 0.75rem;
+  letter-spacing: 0.15em;
+  text-transform: uppercase;
+  color: #ff9100;
+  border-bottom: 1px solid #2a2d3a;
+  padding-bottom: 0.5rem;
 }
 
 .param-panel label {
-  display: block;
-  margin-bottom: 0.5rem;
-  font-size: 0.85rem;
-  color: #aaa;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 1rem;
+  margin-bottom: 0.6rem;
+  font-size: 0.72rem;
+  letter-spacing: 0.04em;
+  color: #8a8f9c;
+  text-transform: uppercase;
 }
 
 .param-panel input {
-  display: block;
-  width: 100%;
-  margin-top: 2px;
-  padding: 4px 6px;
-  background: #0f0f1a;
-  border: 1px solid #333;
-  color: #eee;
-  border-radius: 4px;
+  width: 90px;
+  padding: 4px 8px;
+  background: #0a0b10;
+  border: 1px solid #2a2d3a;
+  color: #ff9100;
+  border-radius: 2px;
+  font-family: 'Courier New', monospace;
+  text-align: right;
+}
+
+.param-panel input:focus {
+  outline: none;
+  border-color: #ff9100;
 }
 
 .param-panel button {
-  margin-top: 0.75rem;
-  padding: 8px 16px;
-  background: #e94560;
-  color: white;
+  margin-top: 1rem;
+  width: 100%;
+  padding: 10px 16px;
+  background: #ff9100;
+  color: #0a0b10;
   border: none;
-  border-radius: 6px;
+  border-radius: 2px;
   cursor: pointer;
-  font-weight: 600;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  font-size: 0.8rem;
 }
 
 .param-panel button:disabled {
-  opacity: 0.5;
+  background: #2a2d3a;
+  color: #666;
   cursor: not-allowed;
 }

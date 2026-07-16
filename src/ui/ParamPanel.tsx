@@ -7,12 +7,12 @@ interface ParamPanelProps {
 }
 
 const DEFAULT_PARAMS: RocketParams = {
-  thrust: 15000, // N
-  dryMass: 50, // kg
-  propellantMass: 100, // kg
-  burnRate: 5, // kg/s -> 20s burn
+  thrust: 2200,       // N — was 15000, way too punchy
+  dryMass: 15,         // kg — was 50
+  propellantMass: 20,  // kg — was 100
+  burnRate: 1.2,       // kg/s -> ~17s burn, was 5
   dragCoefficient: 0.5,
-  crossSectionArea: 0.3 // m^2
+  crossSectionArea: 0.05  // m^2 — was 0.3, too wide for a small model rocket
 }
 
 export function ParamPanel({ onLaunch, disabled }: ParamPanelProps) {
