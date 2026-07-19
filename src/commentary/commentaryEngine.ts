@@ -1,8 +1,6 @@
 import type { Telemetry, CommentaryTrigger } from '../types'
 import { getRandomLine } from './lines'
 
-// Tracks previous telemetry to detect one-shot events (max-Q, burnout, apogee, landing)
-// rather than firing every frame.
 export class CommentaryEngine {
   private lastStage: Telemetry['stage'] | null = null
   private maxQFired = false
@@ -16,11 +14,9 @@ export class CommentaryEngine {
     this.lastAltitude = 0
   }
 
-  // Call once per telemetry tick. Returns a new line if a trigger fired, else null.
   tick(telemetry: Telemetry, airDensity: number): string | null {
     let line: string | null = null
 
-    // Max-Q: track peak dynamic pressure (0.5 * rho * v^2), fire once when it's clearly past peak
     const dynamicPressure = 0.5 * airDensity * telemetry.velocity * telemetry.velocity
     if (dynamicPressure > this.maxDynamicPressure) {
       this.maxDynamicPressure = dynamicPressure
@@ -33,7 +29,6 @@ export class CommentaryEngine {
       line = getRandomLine('max-q')
     }
 
-    // Stage transitions
     if (telemetry.stage !== this.lastStage) {
       const fired = this.fireForStageChange(telemetry.stage)
       if (fired) line = fired
