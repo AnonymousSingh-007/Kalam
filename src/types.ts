@@ -42,3 +42,19 @@ export interface Telemetry {
   mass: number // kg, current total mass
   stage: FlightStage
 }
+
+// Phase 3: Sarcastic commentary
+export type CommentaryTrigger =
+  | 'pre-launch'
+  | 'ignition'
+  | 'max-q'
+  | 'burnout'
+  | 'coast'
+  | 'apogee'
+  | 'descent'
+  | 'landed'
+
+export interface CommentaryLine {
+  trigger: CommentaryTrigger
+  text: string
+}
