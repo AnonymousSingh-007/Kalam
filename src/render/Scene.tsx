@@ -8,12 +8,17 @@ interface SceneProps {
 }
 
 const ALTITUDE_SCALE = 0.05 // meters -> scene units, tune for visual pacing
+const GROUND_CLOUD_COUNT = 260
+const GROUND_CLOUD_WINDOW = 3.0 // seconds after ignition the cloud keeps billowing
 
 export function Scene({ telemetryRef, launched }: SceneProps) {
   const mountRef = useRef<HTMLDivElement>(null)
   const rocketRef = useRef<THREE.Group | null>(null)
   const particlesRef = useRef<THREE.Points | null>(null)
   const particleVelocities = useRef<Float32Array | null>(null)
+  const groundCloudRef = useRef<THREE.Points | null>(null)
+  const groundCloudVel = useRef<Float32Array | null>(null)
+  const groundCloudAge = useRef<Float32Array | null>(null)
   const rafRef = useRef<number>(0)
 
   useEffect(() => {
@@ -71,6 +76,31 @@ export function Scene({ telemetryRef, launched }: SceneProps) {
     ground.position.y = -0.5
     scene.add(ground)
 
+    // ---- Scorch mark — radial-gradient canvas texture on a flat ring under the pad ----
+    const scorchCanvas = document.createElement('canvas')
+    scorchCanvas.width = 256
+    scorchCanvas.height = 256
+    const ctx = scorchCanvas.getContext('2d')!
+    const grad = ctx.createRadialGradient(128, 128, 10, 128, 128, 128)
+    grad.addColorStop(0, 'rgba(10,10,10,0.85)')
+    grad.addColorStop(0.4, 'rgba(20,20,20,0.55)')
+    grad.addColorStop(0.75, 'rgba(30,30,30,0.2)')
+    grad.addColorStop(1, 'rgba(30,30,30,0)')
+    ctx.fillStyle = grad
+    ctx.fillRect(0, 0, 256, 256)
+    const scorchTexture = new THREE.CanvasTexture(scorchCanvas)
+
+    const scorchGeo = new THREE.CircleGeometry(5, 32)
+    const scorchMat = new THREE.MeshBasicMaterial({
+      map: scorchTexture,
+      transparent: true,
+      depthWrite: false
+    })
+    const scorch = new THREE.Mesh(scorchGeo, scorchMat)
+    scorch.rotation.x = -Math.PI / 2
+    scorch.position.y = -0.49 // just above ground plane, avoids z-fighting
+    scene.add(scorch)
+
     // ============================================================
     // ROCKET — multi-stage tapered body, Atlas-Centaur / Vostok
     // proportions: long slender core, tapered interstage, small
@@ -101,7 +131,6 @@ export function Scene({ telemetryRef, launched }: SceneProps) {
 
     let y = 0 // running height cursor, builds the stack bottom-up
 
-    // --- Engine skirt (flared base, widest point) ---
     const skirtHeight = 0.5
     const skirtGeo = new THREE.CylinderGeometry(0.32, 0.42, skirtHeight, 20)
     const skirt = new THREE.Mesh(skirtGeo, engineMat)
@@ -109,7 +138,6 @@ export function Scene({ telemetryRef, launched }: SceneProps) {
     rocket.add(skirt)
     y += skirtHeight
 
-    // --- Engine nozzles (cluster of 3, like Atlas' booster+sustainer look) ---
     const nozzleGeo = new THREE.ConeGeometry(0.09, 0.35, 12, 1, true)
     const nozzlePositions: [number, number][] = [
       [0, 0],
@@ -123,7 +151,6 @@ export function Scene({ telemetryRef, launched }: SceneProps) {
       rocket.add(nozzle)
     }
 
-    // --- Core booster stage (main tapered cylinder) ---
     const boosterHeight = 2.2
     const boosterGeo = new THREE.CylinderGeometry(0.3, 0.32, boosterHeight, 20)
     const booster = new THREE.Mesh(boosterGeo, bodyMat)
@@ -131,7 +158,6 @@ export function Scene({ telemetryRef, launched }: SceneProps) {
     rocket.add(booster)
     y += boosterHeight
 
-    // --- Dark interstage band (Atlas-style paint break) ---
     const bandHeight = 0.15
     const bandGeo = new THREE.CylinderGeometry(0.3, 0.3, bandHeight, 20)
     const band = new THREE.Mesh(bandGeo, darkBandMat)
@@ -139,7 +165,6 @@ export function Scene({ telemetryRef, launched }: SceneProps) {
     rocket.add(band)
     y += bandHeight
 
-    // --- Interstage taper (narrows toward upper stage, Centaur-style) ---
     const taperHeight = 0.4
     const taperGeo = new THREE.CylinderGeometry(0.2, 0.3, taperHeight, 20)
     const taper = new THREE.Mesh(taperGeo, bodyMat)
@@ -147,7 +172,6 @@ export function Scene({ telemetryRef, launched }: SceneProps) {
     rocket.add(taper)
     y += taperHeight
 
-    // --- Upper stage (slimmer sustainer) ---
     const upperHeight = 1.1
     const upperGeo = new THREE.CylinderGeometry(0.2, 0.2, upperHeight, 20)
     const upper = new THREE.Mesh(upperGeo, bodyMat)
@@ -155,7 +179,6 @@ export function Scene({ telemetryRef, launched }: SceneProps) {
     rocket.add(upper)
     y += upperHeight
 
-    // --- Nose cone (ogive-ish taper, sharper tip than a simple cone) ---
     const noseHeight = 0.7
     const noseGeo = new THREE.ConeGeometry(0.2, noseHeight, 20)
     const nose = new THREE.Mesh(noseGeo, noseMat)
@@ -163,7 +186,6 @@ export function Scene({ telemetryRef, launched }: SceneProps) {
     rocket.add(nose)
     y += noseHeight
 
-    // --- Fins (swept trapezoidal, mounted at base of booster) ---
     const finShape = new THREE.Shape()
     finShape.moveTo(0, 0)
     finShape.lineTo(0.45, 0.15)
@@ -188,12 +210,11 @@ export function Scene({ telemetryRef, launched }: SceneProps) {
       rocket.add(fin)
     }
 
-    // Total rocket height for reference (booster base to nose tip) ≈ y
     rocket.position.y = 0
     scene.add(rocket)
     rocketRef.current = rocket
 
-    // ---- Exhaust particles ----
+    // ---- Exhaust particles (trailing under the rocket) ----
     const PARTICLE_COUNT = 200
     const positions = new Float32Array(PARTICLE_COUNT * 3)
     const velocities = new Float32Array(PARTICLE_COUNT * 3)
@@ -219,27 +240,48 @@ export function Scene({ telemetryRef, launched }: SceneProps) {
     scene.add(particles)
     particlesRef.current = particles
 
+    // ---- Ground ignition cloud — billows outward at the pad for the first
+    // few seconds of powered-ascent, staying near ground level regardless
+    // of how fast the rocket climbs ----
+    const cloudPositions = new Float32Array(GROUND_CLOUD_COUNT * 3)
+    const cloudVel = new Float32Array(GROUND_CLOUD_COUNT * 3)
+    const cloudAge = new Float32Array(GROUND_CLOUD_COUNT)
+    for (let i = 0; i < GROUND_CLOUD_COUNT; i++) {
+      cloudPositions[i * 3 + 1] = -100 // parked off-screen until spawned
+      cloudAge[i] = 999 // inactive
+    }
+    groundCloudVel.current = cloudVel
+    groundCloudAge.current = cloudAge
+
+    const cloudGeo = new THREE.BufferGeometry()
+    cloudGeo.setAttribute('position', new THREE.BufferAttribute(cloudPositions, 3))
+    const cloudMat = new THREE.PointsMaterial({
+      color: 0xcccccc,
+      size: 0.55,
+      transparent: true,
+      opacity: 0.5,
+      depthWrite: false
+    })
+    const groundCloud = new THREE.Points(cloudGeo, cloudMat)
+    scene.add(groundCloud)
+    groundCloudRef.current = groundCloud
+
     // ---- Render loop ----
     function animate() {
       const telemetry = telemetryRef.current
       const r = rocketRef.current
       const p = particlesRef.current
+      const gc = groundCloudRef.current
 
       if (r && telemetry) {
         r.position.y = telemetry.altitude * ALTITUDE_SCALE
         r.rotation.z = THREE.MathUtils.clamp(telemetry.velocity * 0.002, -0.15, 0.15)
 
-        // Camera rig: vertical position tracks the rocket 1:1 (rises exactly as
-        // it climbs, no lag), while distance/height offset slowly zooms out so
-        // the full rocket + surrounding context stays framed at high altitude.
-        const zoomFactor = Math.min(r.position.y / 15, 1) // 0 -> 1 as it climbs
-
+        const zoomFactor = Math.min(r.position.y / 15, 1)
         const baseCamY = 4
-        const camY = baseCamY + r.position.y // locked to rocket's height, 1:1
-
+        const camY = baseCamY + r.position.y
         const offsetX = 9 + zoomFactor * 6
         const offsetZ = 13 + zoomFactor * 9
-
         camera.position.set(offsetX, camY, offsetZ)
 
         const lookTarget = new THREE.Vector3(0, r.position.y + 1, 0)
@@ -270,6 +312,46 @@ export function Scene({ telemetryRef, launched }: SceneProps) {
         posAttr.needsUpdate = true
       }
 
+      // Ground cloud: spawns near the pad for the first GROUND_CLOUD_WINDOW
+      // seconds of powered-ascent, billows outward and slowly upward, then
+      // parks off-screen once its age expires — independent of rocket height.
+      if (gc && telemetry) {
+        const posAttr = gc.geometry.getAttribute('position') as THREE.BufferAttribute
+        const vel = groundCloudVel.current!
+        const age = groundCloudAge.current!
+        const spawning =
+          telemetry.stage === 'powered-ascent' && telemetry.time < GROUND_CLOUD_WINDOW
+        const dt = 1 / 60
+
+        for (let i = 0; i < GROUND_CLOUD_COUNT; i++) {
+          const idx = i * 3
+
+          if (spawning && Math.random() < 0.15) {
+            const angle = Math.random() * Math.PI * 2
+            const radius = Math.random() * 0.4
+            posAttr.array[idx] = Math.cos(angle) * radius
+            posAttr.array[idx + 1] = -0.3
+            posAttr.array[idx + 2] = Math.sin(angle) * radius
+
+            const outSpeed = 0.03 + Math.random() * 0.05
+            vel[idx] = Math.cos(angle) * outSpeed
+            vel[idx + 1] = 0.01 + Math.random() * 0.015
+            vel[idx + 2] = Math.sin(angle) * outSpeed
+            age[i] = 0
+          } else if (age[i] < 4) {
+            posAttr.array[idx] += vel[idx]
+            posAttr.array[idx + 1] += vel[idx + 1]
+            posAttr.array[idx + 2] += vel[idx + 2]
+            vel[idx] *= 0.98 // drag, cloud slows as it expands
+            vel[idx + 2] *= 0.98
+            age[i] += dt
+          } else if (posAttr.array[idx + 1] !== -100) {
+            posAttr.array[idx + 1] = -100 // park off-screen once fully aged out
+          }
+        }
+        posAttr.needsUpdate = true
+      }
+
       renderer.render(scene, camera)
       rafRef.current = requestAnimationFrame(animate)
     }
@@ -286,6 +368,9 @@ export function Scene({ telemetryRef, launched }: SceneProps) {
     if (!launched && rocketRef.current) {
       rocketRef.current.position.y = 0
       rocketRef.current.rotation.z = 0
+    }
+    if (!launched && groundCloudAge.current) {
+      groundCloudAge.current.fill(999) // reset cloud on re-arm
     }
   }, [launched])
 
