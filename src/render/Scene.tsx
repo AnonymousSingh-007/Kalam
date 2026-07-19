@@ -229,10 +229,19 @@ export function Scene({ telemetryRef, launched }: SceneProps) {
         r.position.y = telemetry.altitude * ALTITUDE_SCALE
         r.rotation.z = THREE.MathUtils.clamp(telemetry.velocity * 0.002, -0.15, 0.15)
 
-        // camera gently follows altitude so the rocket doesn't fly off-frame
-        const targetY = 3 + r.position.y * 0.3
-        camera.position.y += (4 + r.position.y * 0.3 - camera.position.y) * 0.03
-        camera.lookAt(0, targetY, 0)
+        // Camera rig: fixed offset from the rocket, smoothly chases its position.
+        // As altitude grows, ease the offset back/up too so fast climbs don't
+        // outrun the lerp — offset scales gently with height.
+        const heightFactor = Math.min(r.position.y / 20, 1) // 0 -> 1 as it climbs
+        const offsetX = 9 + heightFactor * 4
+        const offsetY = 4 + r.position.y * 0.5
+        const offsetZ = 13 + heightFactor * 6
+
+        const targetCamPos = new THREE.Vector3(offsetX, offsetY, offsetZ)
+        camera.position.lerp(targetCamPos, 0.08)
+
+        const lookTarget = new THREE.Vector3(0, r.position.y + 1, 0)
+        camera.lookAt(lookTarget)
       }
 
       if (p && telemetry) {
