@@ -4,6 +4,7 @@ import { countFingers } from './hand/fingerCount'
 import { CountdownMachine } from './state/countdownMachine'
 import { RocketPhysicsEngine } from './physics/rocketPhysics'
 import { CommentaryEngine } from './commentary/commentaryEngine'
+import { getRandomLine } from './commentary/lines'
 import { ParamPanel } from './ui/ParamPanel'
 import { Scene } from './render/Scene'
 import type { CountdownState, Telemetry, RocketParams } from './types'
@@ -61,6 +62,12 @@ function App() {
           `hands: ${hands.length} | score: ${hands[0]?.score?.toFixed(2) ?? 'n/a'} | hand: ${hands[0]?.handedness ?? 'n/a'} | reading: ${reading}`
         )
         machine.tick(reading)
+        if (state.phase === 'counting') {
+          setCommentary((prev) => {
+            const line = getRandomLine('countdown')
+            return line || prev
+          })
+        }
       }
 
       if (engineRef.current && timestamp !== undefined) {
@@ -90,6 +97,17 @@ function App() {
       trackerRef.current?.dispose()
     }
   }, [])
+
+  useEffect(() => {
+    if (!commentary) return
+    if (!('speechSynthesis' in window)) return
+
+    window.speechSynthesis.cancel() // stop any line still talking, don't overlap
+    const utterance = new SpeechSynthesisUtterance(commentary)
+    utterance.rate = 1.05
+    utterance.pitch = 0.9
+    window.speechSynthesis.speak(utterance)
+  }, [commentary])
 
   function handleLaunch(params: RocketParams) {
     if (state.phase !== 'armed') return

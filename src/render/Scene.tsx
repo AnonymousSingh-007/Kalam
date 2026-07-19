@@ -229,17 +229,28 @@ export function Scene({ telemetryRef, launched }: SceneProps) {
         r.position.y = telemetry.altitude * ALTITUDE_SCALE
         r.rotation.z = THREE.MathUtils.clamp(telemetry.velocity * 0.002, -0.15, 0.15)
 
-        // camera gently follows altitude so the rocket doesn't fly off-frame
-        const targetY = 3 + r.position.y * 0.3
-        camera.position.y += (4 + r.position.y * 0.3 - camera.position.y) * 0.03
-        camera.lookAt(0, targetY, 0)
+        // Camera rig: vertical position tracks the rocket 1:1 (rises exactly as
+        // it climbs, no lag), while distance/height offset slowly zooms out so
+        // the full rocket + surrounding context stays framed at high altitude.
+        const zoomFactor = Math.min(r.position.y / 15, 1) // 0 -> 1 as it climbs
+
+        const baseCamY = 4
+        const camY = baseCamY + r.position.y // locked to rocket's height, 1:1
+
+        const offsetX = 9 + zoomFactor * 6
+        const offsetZ = 13 + zoomFactor * 9
+
+        camera.position.set(offsetX, camY, offsetZ)
+
+        const lookTarget = new THREE.Vector3(0, r.position.y + 1, 0)
+        camera.lookAt(lookTarget)
       }
 
       if (p && telemetry) {
         const isThrusting = telemetry.stage === 'powered-ascent'
         const posAttr = p.geometry.getAttribute('position') as THREE.BufferAttribute
         const vel = particleVelocities.current!
-        const baseY = r ? r.position.y : 0 // exhaust spawns at rocket base (skirt), y≈0 offset built into rocket group
+        const baseY = r ? r.position.y : 0
 
         for (let i = 0; i < PARTICLE_COUNT; i++) {
           const idx = i * 3
