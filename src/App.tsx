@@ -6,6 +6,7 @@ import { RocketPhysicsEngine } from './physics/rocketPhysics'
 import { CommentaryEngine } from './commentary/commentaryEngine'
 import { getRandomLine } from './commentary/lines'
 import { ParamPanel } from './ui/ParamPanel'
+import { InstrumentPanel } from './ui/InstrumentPanel'
 import { Scene } from './render/Scene'
 import type { CountdownState, Telemetry, RocketParams } from './types'
 import './App.css'
@@ -27,6 +28,7 @@ function App() {
   const [launched, setLaunched] = useState(false)
   const [showDebug, setShowDebug] = useState(false)
   const [commentary, setCommentary] = useState('')
+  const [telemetryDisplay, setTelemetryDisplay] = useState<Telemetry | null>(null)
 
   useEffect(() => {
     machine.onChange(setState)
@@ -62,11 +64,10 @@ function App() {
           `hands: ${hands.length} | score: ${hands[0]?.score?.toFixed(2) ?? 'n/a'} | hand: ${hands[0]?.handedness ?? 'n/a'} | reading: ${reading}`
         )
         machine.tick(reading)
-        if (state.phase === 'counting') {
-          setCommentary((prev) => {
-            const line = getRandomLine('countdown')
-            return line || prev
-          })
+
+        if (machine.getState().phase === 'counting' && Math.random() < 0.02) {
+          const line = getRandomLine('countdown')
+          if (line) setCommentary(line)
         }
       }
 
@@ -82,6 +83,11 @@ function App() {
           if (line) setCommentary(line)
           if (t.altitude <= 0 && t.stage === 'descent' && t.time > 1) {
             setCommentary((prev) => prev || commentaryEngineRef.current.fireLanded())
+          }
+
+          // Throttle UI telemetry updates to ~5x/sec instead of every frame
+          if (Math.floor(t.time * 10) % 2 === 0) {
+            setTelemetryDisplay({ ...t })
           }
         }
       }
@@ -102,7 +108,7 @@ function App() {
     if (!commentary) return
     if (!('speechSynthesis' in window)) return
 
-    window.speechSynthesis.cancel() // stop any line still talking, don't overlap
+    window.speechSynthesis.cancel()
     const utterance = new SpeechSynthesisUtterance(commentary)
     utterance.rate = 1.05
     utterance.pitch = 0.9
@@ -140,6 +146,8 @@ function App() {
 
       <main className="stage">
         <div className="viewport">
+          <InstrumentPanel telemetry={telemetryDisplay} />
+
           <Scene telemetryRef={telemetryRef} launched={launched} />
 
           <video ref={videoRef} className="webcam-pip" muted playsInline />

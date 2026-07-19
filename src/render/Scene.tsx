@@ -82,10 +82,10 @@ export function Scene({ telemetryRef, launched }: SceneProps) {
     scorchCanvas.height = 256
     const ctx = scorchCanvas.getContext('2d')!
     const grad = ctx.createRadialGradient(128, 128, 10, 128, 128, 128)
-    grad.addColorStop(0, 'rgba(10,10,10,0.85)')
-    grad.addColorStop(0.4, 'rgba(20,20,20,0.55)')
-    grad.addColorStop(0.75, 'rgba(30,30,30,0.2)')
-    grad.addColorStop(1, 'rgba(30,30,30,0)')
+    grad.addColorStop(0, 'rgba(0,0,0,0.9)')
+    grad.addColorStop(0.35, 'rgba(60,40,20,0.6)')
+    grad.addColorStop(0.7, 'rgba(80,60,30,0.25)')
+    grad.addColorStop(1, 'rgba(80,60,30,0)')
     ctx.fillStyle = grad
     ctx.fillRect(0, 0, 256, 256)
     const scorchTexture = new THREE.CanvasTexture(scorchCanvas)
@@ -98,7 +98,7 @@ export function Scene({ telemetryRef, launched }: SceneProps) {
     })
     const scorch = new THREE.Mesh(scorchGeo, scorchMat)
     scorch.rotation.x = -Math.PI / 2
-    scorch.position.y = -0.49 // just above ground plane, avoids z-fighting
+    scorch.position.y = -0.48 // just above ground plane, avoids z-fighting
     scene.add(scorch)
 
     // ============================================================
@@ -256,11 +256,12 @@ export function Scene({ telemetryRef, launched }: SceneProps) {
     const cloudGeo = new THREE.BufferGeometry()
     cloudGeo.setAttribute('position', new THREE.BufferAttribute(cloudPositions, 3))
     const cloudMat = new THREE.PointsMaterial({
-      color: 0xcccccc,
-      size: 0.55,
+      color: 0xf0f0f0,
+      size: 1.1,
       transparent: true,
-      opacity: 0.5,
-      depthWrite: false
+      opacity: 0.75,
+      depthWrite: false,
+      sizeAttenuation: true
     })
     const groundCloud = new THREE.Points(cloudGeo, cloudMat)
     scene.add(groundCloud)
@@ -328,7 +329,7 @@ export function Scene({ telemetryRef, launched }: SceneProps) {
 
           if (spawning && Math.random() < 0.15) {
             const angle = Math.random() * Math.PI * 2
-            const radius = Math.random() * 0.4
+            const radius = Math.random() * 1.2
             posAttr.array[idx] = Math.cos(angle) * radius
             posAttr.array[idx + 1] = -0.3
             posAttr.array[idx + 2] = Math.sin(angle) * radius
