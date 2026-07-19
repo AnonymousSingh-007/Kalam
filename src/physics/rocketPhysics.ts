@@ -1,7 +1,9 @@
 import type { RocketParams, Telemetry, FlightStage } from '../types'
 
-const GRAVITY = 9.81 // m/s^2
-const AIR_DENSITY_SEA_LEVEL = 1.225 // kg/m^3, simplified constant (no altitude falloff yet)
+const GRAVITY_SEA_LEVEL = 9.81 // m/s^2
+const EARTH_RADIUS = 6_371_000 // m, for gravity falloff at altitude
+const AIR_DENSITY_SEA_LEVEL = 1.225 // kg/m^3
+const SCALE_HEIGHT = 8500 // m, atmospheric scale height for exponential falloff
 
 export class RocketPhysicsEngine {
   private params: RocketParams
@@ -11,6 +13,7 @@ export class RocketPhysicsEngine {
   private acceleration = 0
   private stage: FlightStage = 'pre-launch'
   private maxAltitudeReached = 0
+  private hasBurnedOut = false
 
   constructor(params: RocketParams) {
     this.params = params
@@ -24,6 +27,7 @@ export class RocketPhysicsEngine {
     this.acceleration = 0
     this.stage = 'pre-launch'
     this.maxAltitudeReached = 0
+    this.hasBurnedOut = false
   }
 
   private currentMass(): number {
@@ -38,7 +42,19 @@ export class RocketPhysicsEngine {
     return burnRate * this.time < propellantMass
   }
 
-  // Call repeatedly with a small fixed timestep (e.g. 1/60s) after launch()
+  // Gravity weakens slightly with altitude — negligible for model rockets,
+  // but keeps the model honest at higher altitudes.
+  private gravityAt(altitude: number): number {
+    const ratio = EARTH_RADIUS / (EARTH_RADIUS + altitude)
+    return GRAVITY_SEA_LEVEL * ratio * ratio
+  }
+
+  // Exponential atmospheric density falloff (simplified barometric formula)
+  private airDensityAt(altitude: number): number {
+    if (altitude < 0) return AIR_DENSITY_SEA_LEVEL
+    return AIR_DENSITY_SEA_LEVEL * Math.exp(-altitude / SCALE_HEIGHT)
+  }
+
   step(dt: number): Telemetry {
     if (this.stage === 'pre-launch') {
       return this.snapshot()
@@ -46,19 +62,20 @@ export class RocketPhysicsEngine {
 
     const mass = this.currentMass()
     const burning = this.isBurning()
+    const g = this.gravityAt(this.altitude)
+    const rho = this.airDensityAt(this.altitude)
 
     const thrustForce = burning ? this.params.thrust : 0
-    const weightForce = mass * GRAVITY
+    const weightForce = mass * g
 
     const dragForce =
       0.5 *
-      AIR_DENSITY_SEA_LEVEL *
+      rho *
       this.velocity *
       Math.abs(this.velocity) *
       this.params.dragCoefficient *
       this.params.crossSectionArea
 
-    // Drag opposes motion, so it subtracts using velocity's own sign (handled by v*|v| above)
     const netForce = thrustForce - weightForce - dragForce
     this.acceleration = netForce / mass
 
@@ -66,27 +83,41 @@ export class RocketPhysicsEngine {
     this.altitude += this.velocity * dt
     this.time += dt
 
+    if (!burning && !this.hasBurnedOut) {
+      this.hasBurnedOut = true
+    }
+
     if (this.altitude < 0) {
       this.altitude = 0
       this.velocity = 0
     }
 
     this.maxAltitudeReached = Math.max(this.maxAltitudeReached, this.altitude)
-
-    // Stage transitions
-    if (this.altitude <= 0 && this.time > 0.5) {
-      this.stage = this.stage // touched ground — leave as descent, caller can detect via altitude===0
-    } else if (!burning && this.velocity > 0) {
-      this.stage = 'coast'
-    } else if (!burning && this.velocity <= 0 && this.altitude >= this.maxAltitudeReached - 0.01) {
-      this.stage = 'apogee'
-    } else if (!burning && this.velocity < 0) {
-      this.stage = 'descent'
-    } else if (burning) {
-      this.stage = 'powered-ascent'
-    }
+    this.updateStage()
 
     return this.snapshot()
+  }
+
+  private updateStage(): void {
+    const burning = this.isBurning()
+
+    if (this.altitude <= 0 && this.hasBurnedOut && this.velocity <= 0) {
+      this.stage = 'descent'
+      return
+    }
+    if (burning) {
+      this.stage = 'powered-ascent'
+      return
+    }
+    // Not burning past this point
+    const nearPeak = this.altitude >= this.maxAltitudeReached - 0.05
+    if (this.velocity > 0.5) {
+      this.stage = 'coast'
+    } else if (nearPeak && Math.abs(this.velocity) <= 0.5) {
+      this.stage = 'apogee'
+    } else {
+      this.stage = 'descent'
+    }
   }
 
   launch(): void {
