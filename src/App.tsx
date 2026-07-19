@@ -22,6 +22,7 @@ function App() {
   const [status, setStatus] = useState('Loading model...')
   const [debug, setDebug] = useState('')
   const [launched, setLaunched] = useState(false)
+  const [showDebug, setShowDebug] = useState(false)
 
   useEffect(() => {
     machine.onChange(setState)
@@ -54,12 +55,11 @@ function App() {
         const hands = tracker.detect(video, performance.now())
         const reading = hands.length > 0 ? countFingers(hands[0]) : null
         setDebug(
-          `hands detected: ${hands.length} | score: ${hands[0]?.score?.toFixed(2) ?? 'n/a'} | handedness: ${hands[0]?.handedness ?? 'n/a'} | reading: ${reading}`
+          `hands: ${hands.length} | score: ${hands[0]?.score?.toFixed(2) ?? 'n/a'} | hand: ${hands[0]?.handedness ?? 'n/a'} | reading: ${reading}`
         )
         machine.tick(reading)
       }
 
-      // Physics step, only once armed/launched engine exists
       if (engineRef.current && timestamp !== undefined) {
         const dt = lastTimeRef.current ? (timestamp - lastTimeRef.current) / 1000 : 1 / 60
         lastTimeRef.current = timestamp
@@ -78,8 +78,6 @@ function App() {
     }
   }, [])
 
-  // React to countdown machine reaching 'armed' -> wait for explicit launch param submit
-  // Launch button in ParamPanel triggers actual physics + rocket launch
   function handleLaunch(params: RocketParams) {
     if (state.phase !== 'armed') return
     const engine = new RocketPhysicsEngine(params)
@@ -90,17 +88,60 @@ function App() {
     setLaunched(true)
   }
 
+  const phaseLabel: Record<CountdownState['phase'], string> = {
+    idle: 'STANDBY',
+    counting: 'AWAITING GESTURE',
+    armed: 'ARMED — SET PARAMETERS',
+    launched: 'IN FLIGHT'
+  }
+
   return (
     <div className="app">
-      <h1>Kalam</h1>
-      <p className="status">{status}</p>
-      <video ref={videoRef} className="webcam" muted playsInline style={{ display: 'none' }} />
-      <Scene telemetryRef={telemetryRef} launched={launched} />
-      <div className="state-readout">
-        <strong>State:</strong> {JSON.stringify(state)}
-      </div>
-      <div className="state-readout">{debug}</div>
-      <ParamPanel onLaunch={handleLaunch} disabled={state.phase !== 'armed'} />
+      <header className="topbar">
+        <h1>KALAM</h1>
+        <div className="topbar-status">
+          <span className="status-dot" data-phase={state.phase} />
+          <span className="status-text">{phaseLabel[state.phase]}</span>
+        </div>
+      </header>
+
+      <main className="stage">
+        <div className="viewport">
+          <Scene telemetryRef={telemetryRef} launched={launched} />
+
+          <video
+            ref={videoRef}
+            className="webcam-pip"
+            muted
+            playsInline
+          />
+
+          {state.phase === 'counting' && (
+            <div className="countdown-overlay">
+              {state.expected}
+            </div>
+          )}
+        </div>
+
+        <aside className="side-dock">
+          <ParamPanel onLaunch={handleLaunch} disabled={state.phase !== 'armed'} />
+
+          <button
+            className="debug-toggle"
+            onClick={() => setShowDebug((s) => !s)}
+          >
+            {showDebug ? 'Hide' : 'Show'} diagnostics
+          </button>
+
+          {showDebug && (
+            <div className="diagnostics">
+              <div>{status}</div>
+              <div>{JSON.stringify(state)}</div>
+              <div>{debug}</div>
+            </div>
+          )}
+        </aside>
+      </main>
     </div>
   )
 }

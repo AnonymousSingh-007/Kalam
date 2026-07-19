@@ -1,40 +1,141 @@
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+}
+
 .app {
   font-family: system-ui, sans-serif;
   color: #eee;
-  background: #0f0f1a;
+  background: #08090d;
   min-height: 100vh;
-  padding: 2rem;
-  text-align: center;
 }
 
-.status {
-  color: #999;
-  margin-bottom: 1rem;
+.topbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 1rem 2rem;
+  border-bottom: 1px solid #1e2028;
 }
 
-.webcam {
-  width: 640px;
-  max-width: 90vw;
-  border-radius: 12px;
+.topbar h1 {
+  font-size: 1.1rem;
+  letter-spacing: 0.3em;
+  margin: 0;
+  color: #ff9100;
+  font-weight: 700;
+}
+
+.topbar-status {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-family: 'Courier New', monospace;
+  font-size: 0.75rem;
+  letter-spacing: 0.08em;
+  color: #8a8f9c;
+}
+
+.status-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #666;
+}
+.status-dot[data-phase='counting'] { background: #facc15; }
+.status-dot[data-phase='armed'] { background: #4ade80; }
+.status-dot[data-phase='launched'] { background: #ff9100; }
+
+.stage {
+  display: grid;
+  grid-template-columns: 1fr 320px;
+  gap: 1.5rem;
+  padding: 1.5rem 2rem;
+  align-items: start;
+}
+
+.viewport {
+  position: relative;
+  background: #0a0a12;
+  border: 1px solid #1e2028;
+  border-radius: 6px;
+  overflow: hidden;
+  aspect-ratio: 4 / 3;
+}
+
+.viewport canvas {
+  width: 100% !important;
+  height: 100% !important;
+  display: block;
+}
+
+.webcam-pip {
+  position: absolute;
+  bottom: 12px;
+  right: 12px;
+  width: 120px;
+  height: 90px;
+  border-radius: 4px;
+  border: 1px solid #333;
+  object-fit: cover;
   transform: scaleX(-1);
+  opacity: 0.85;
 }
 
-.state-readout {
-  margin-top: 1rem;
-  font-family: monospace;
-  background: #1a1a2e;
-  padding: 0.75rem 1rem;
-  border-radius: 8px;
-  display: inline-block;
+.countdown-overlay {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  font-family: 'Courier New', monospace;
+  font-size: 6rem;
+  font-weight: 700;
+  color: #ff9100;
+  text-shadow: 0 0 30px rgba(255, 145, 0, 0.5);
+  pointer-events: none;
 }
+
+.side-dock {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+
+.debug-toggle {
+  background: none;
+  border: 1px solid #2a2d3a;
+  color: #666;
+  font-size: 0.65rem;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  padding: 6px 10px;
+  border-radius: 2px;
+  cursor: pointer;
+  align-self: flex-start;
+}
+
+.diagnostics {
+  font-family: 'Courier New', monospace;
+  font-size: 0.65rem;
+  color: #666;
+  background: #0a0b10;
+  border: 1px solid #1e2028;
+  border-radius: 4px;
+  padding: 8px 10px;
+  word-break: break-word;
+  line-height: 1.5;
+}
+
+/* ---- Param panel (unchanged from before) ---- */
 
 .param-panel {
-  margin-top: 1.5rem;
   background: #12141c;
   border: 1px solid #2a2d3a;
   padding: 1.25rem 1.5rem;
   border-radius: 4px;
-  display: inline-block;
   text-align: left;
   font-family: 'Courier New', monospace;
   box-shadow: 0 0 0 1px rgba(255, 145, 0, 0.08);
@@ -53,9 +154,11 @@
 .param-panel label {
   display: flex;
   justify-content: space-between;
-  align-items: center;
+  align-items: flex-start;
   gap: 1rem;
   margin-bottom: 0.6rem;
+  padding-bottom: 8px;
+  border-bottom: 1px solid #1a1c26;
   font-size: 0.72rem;
   letter-spacing: 0.04em;
   color: #8a8f9c;
@@ -125,12 +228,6 @@
   font-size: 0.65rem;
   color: #5a5f6c;
   width: 24px;
-}
-
-.param-panel label {
-  align-items: flex-start;
-  padding-bottom: 8px;
-  border-bottom: 1px solid #1a1c26;
 }
 
 .derived-stats {
