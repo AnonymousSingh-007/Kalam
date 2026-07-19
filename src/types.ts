@@ -45,6 +45,7 @@ export interface Telemetry {
 
 // Phase 3: Sarcastic commentary
 export type CommentaryTrigger =
+  | 'countdown'
   | 'pre-launch'
   | 'ignition'
   | 'max-q'
