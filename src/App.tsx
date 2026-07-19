@@ -91,6 +91,17 @@ function App() {
     }
   }, [])
 
+  useEffect(() => {
+    if (!commentary) return
+    if (!('speechSynthesis' in window)) return
+
+    window.speechSynthesis.cancel() // stop any line still talking, don't overlap
+    const utterance = new SpeechSynthesisUtterance(commentary)
+    utterance.rate = 1.05
+    utterance.pitch = 0.9
+    window.speechSynthesis.speak(utterance)
+  }, [commentary])
+
   function handleLaunch(params: RocketParams) {
     if (state.phase !== 'armed') return
     const engine = new RocketPhysicsEngine(params)
