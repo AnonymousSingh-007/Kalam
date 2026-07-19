@@ -276,6 +276,7 @@ export function Scene({ telemetryRef, launched }: SceneProps) {
 
       if (r && telemetry) {
         r.position.y = telemetry.altitude * ALTITUDE_SCALE
+        r.position.x = telemetry.lateralOffset * ALTITUDE_SCALE
         r.rotation.z = THREE.MathUtils.clamp(telemetry.velocity * 0.002, -0.15, 0.15)
 
         const zoomFactor = Math.min(r.position.y / 15, 1)
