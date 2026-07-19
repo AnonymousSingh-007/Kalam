@@ -83,6 +83,7 @@ body {
   object-fit: cover;
   transform: scaleX(-1);
   opacity: 0.85;
+  z-index: 2;
 }
 
 .countdown-overlay {
@@ -96,6 +97,7 @@ body {
   color: #ff9100;
   text-shadow: 0 0 30px rgba(255, 145, 0, 0.5);
   pointer-events: none;
+  z-index: 2;
 }
 
 .commentary-caption {
@@ -110,6 +112,69 @@ body {
   border-left: 2px solid #ff9100;
   padding: 8px 12px;
   border-radius: 2px;
+  z-index: 2;
+}
+
+.instrument-panel {
+  position: absolute;
+  top: 16px;
+  left: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  z-index: 2;
+}
+
+.gauge {
+  position: relative;
+  width: 80px;
+  height: 80px;
+  background: rgba(10, 10, 18, 0.6);
+  border-radius: 50%;
+}
+
+.gauge-svg {
+  width: 100%;
+  height: 100%;
+}
+
+.gauge-track {
+  fill: none;
+  stroke: #1e2028;
+  stroke-width: 4;
+}
+
+.gauge-arc {
+  transition: stroke-dashoffset 0.2s linear;
+}
+
+.gauge-readout {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  font-family: 'Courier New', monospace;
+}
+
+.gauge-label {
+  font-size: 0.5rem;
+  color: #666;
+  letter-spacing: 0.1em;
+}
+
+.gauge-value {
+  font-size: 0.9rem;
+  font-weight: 700;
+  color: #eee;
+  line-height: 1.1;
+}
+
+.gauge-unit {
+  font-size: 0.5rem;
+  color: #666;
 }
 
 .side-dock {
