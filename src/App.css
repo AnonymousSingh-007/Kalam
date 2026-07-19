@@ -98,6 +98,20 @@ body {
   pointer-events: none;
 }
 
+.commentary-caption {
+  position: absolute;
+  bottom: 16px;
+  left: 16px;
+  right: 150px;
+  font-family: 'Courier New', monospace;
+  font-size: 0.85rem;
+  color: #ff9100;
+  background: rgba(10, 10, 18, 0.75);
+  border-left: 2px solid #ff9100;
+  padding: 8px 12px;
+  border-radius: 2px;
+}
+
 .side-dock {
   display: flex;
   flex-direction: column;
@@ -129,7 +143,7 @@ body {
   line-height: 1.5;
 }
 
-/* ---- Param panel (unchanged from before) ---- */
+/* ---- Param panel ---- */
 
 .param-panel {
   background: #12141c;
