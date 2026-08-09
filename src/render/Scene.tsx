@@ -17,11 +17,16 @@ export function Scene({ telemetryRef, launched }: SceneProps) {
   const rafRef = useRef<number>(0)
 
   useEffect(() => {
-    const mount = mountRef.current
-    if (!mount) return
+    const mountEl = mountRef.current
+    if (!mountEl) return
+    // Re-bound with a non-nullable type so nested closures (handleResize, the
+    // cleanup function) don't need repeated null checks — TS narrowing on
+    // `mountRef.current` doesn't persist into nested function declarations.
+    const mount: HTMLDivElement = mountEl
 
-    const width = 640
-    const height = 480
+    // Fall back to the old fixed size only if the container hasn't been laid out yet.
+    const width = mount.clientWidth || 640
+    const height = mount.clientHeight || 480
 
     // ---- Core scene setup ----
     const scene = new THREE.Scene()
@@ -32,13 +37,29 @@ export function Scene({ telemetryRef, launched }: SceneProps) {
     camera.lookAt(0, 3, 0)
 
     const renderer = new THREE.WebGLRenderer({ antialias: true })
-    renderer.setSize(width, height)
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2))
+    renderer.setSize(width, height, true)
+    renderer.shadowMap.enabled = true
+    renderer.shadowMap.type = THREE.PCFSoftShadowMap
     mount.appendChild(renderer.domElement)
 
     // ---- Lighting ----
     scene.add(new THREE.AmbientLight(0xffffff, 0.5))
     const sun = new THREE.DirectionalLight(0xffffff, 1)
     sun.position.set(5, 10, 5)
+    sun.castShadow = true
+    sun.shadow.mapSize.width = 2048
+    sun.shadow.mapSize.height = 2048
+    // Frustum sized around the pad + low-altitude flight, not the full 60x60 ground —
+    // first-pass numbers, eyeball/tune against the actual camera framing if needed.
+    sun.shadow.camera.left = -8
+    sun.shadow.camera.right = 8
+    sun.shadow.camera.top = 12
+    sun.shadow.camera.bottom = -4
+    sun.shadow.camera.near = 1
+    sun.shadow.camera.far = 30
+    sun.shadow.bias = -0.001
+    sun.shadow.camera.updateProjectionMatrix()
     scene.add(sun)
 
     // ---- Launch pad ----
@@ -46,6 +67,7 @@ export function Scene({ telemetryRef, launched }: SceneProps) {
     const padMat = new THREE.MeshStandardMaterial({ color: 0x444444 })
     const pad = new THREE.Mesh(padGeo, padMat)
     pad.position.y = -0.25
+    pad.receiveShadow = true
     scene.add(pad)
 
     // Ground plane for scale reference
@@ -54,6 +76,7 @@ export function Scene({ telemetryRef, launched }: SceneProps) {
     const ground = new THREE.Mesh(groundGeo, groundMat)
     ground.rotation.x = -Math.PI / 2
     ground.position.y = -0.5
+    ground.receiveShadow = true
     scene.add(ground)
 
     // ---- Rocket (body + nose cone + fins) ----
@@ -63,12 +86,14 @@ export function Scene({ telemetryRef, launched }: SceneProps) {
     const bodyMat = new THREE.MeshStandardMaterial({ color: 0xdddddd })
     const body = new THREE.Mesh(bodyGeo, bodyMat)
     body.position.y = 1.25
+    body.castShadow = true
     rocket.add(body)
 
     const noseGeo = new THREE.ConeGeometry(0.3, 0.8, 16)
     const noseMat = new THREE.MeshStandardMaterial({ color: 0xff3b30 })
     const nose = new THREE.Mesh(noseGeo, noseMat)
     nose.position.y = 2.9
+    nose.castShadow = true
     rocket.add(nose)
 
     const finGeo = new THREE.BoxGeometry(0.05, 0.6, 0.5)
@@ -78,6 +103,7 @@ export function Scene({ telemetryRef, launched }: SceneProps) {
       const angle = (i / 4) * Math.PI * 2
       fin.position.set(Math.cos(angle) * 0.3, 0.3, Math.sin(angle) * 0.3)
       fin.rotation.y = angle
+      fin.castShadow = true
       rocket.add(fin)
     }
 
@@ -86,6 +112,8 @@ export function Scene({ telemetryRef, launched }: SceneProps) {
     rocketRef.current = rocket
 
     // ---- Exhaust particles ----
+    // Intentionally no castShadow/receiveShadow here — points-based shadows read as
+    // noise and aren't worth the extra shadow-map draw calls.
     const PARTICLE_COUNT = 200
     const positions = new Float32Array(PARTICLE_COUNT * 3)
     const velocities = new Float32Array(PARTICLE_COUNT * 3)
@@ -152,8 +180,33 @@ export function Scene({ telemetryRef, launched }: SceneProps) {
     }
     animate()
 
+    // ---- Responsive sizing ----
+    // Keep the renderer's internal resolution (and canvas drawing buffer) matched
+    // to the mount div's actual pixel size, so the canvas is never CSS-stretched.
+    function handleResize() {
+      const w = mount.clientWidth
+      const h = mount.clientHeight
+      if (w === 0 || h === 0) return
+      camera.aspect = w / h
+      camera.updateProjectionMatrix()
+      renderer.setSize(w, h, true)
+    }
+
+    let resizeObserver: ResizeObserver | null = null
+    if (typeof ResizeObserver !== 'undefined') {
+      resizeObserver = new ResizeObserver(handleResize)
+      resizeObserver.observe(mount)
+    } else {
+      window.addEventListener('resize', handleResize)
+    }
+
     return () => {
       cancelAnimationFrame(rafRef.current)
+      if (resizeObserver) {
+        resizeObserver.disconnect()
+      } else {
+        window.removeEventListener('resize', handleResize)
+      }
       renderer.dispose()
       mount.removeChild(renderer.domElement)
     }
@@ -167,5 +220,10 @@ export function Scene({ telemetryRef, launched }: SceneProps) {
     }
   }, [launched])
 
-  return <div ref={mountRef} />
+  return (
+    <div
+      ref={mountRef}
+      style={{ width: '100%', maxWidth: '960px', aspectRatio: '4 / 3', margin: '0 auto' }}
+    />
+  )
 }

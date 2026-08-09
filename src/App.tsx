@@ -53,6 +53,7 @@ function App() {
       if (video && tracker && tracker.isReady() && video.readyState >= 2) {
         const hands = tracker.detect(video, performance.now())
         const reading = hands.length > 0 ? countFingers(hands[0]) : null
+        console.log(`[reading] t=${performance.now().toFixed(0)} value=${reading}`)
         setDebug(
           `hands detected: ${hands.length} | score: ${hands[0]?.score?.toFixed(2) ?? 'n/a'} | handedness: ${hands[0]?.handedness ?? 'n/a'} | reading: ${reading}`
         )

@@ -6,8 +6,7 @@ import type { DetectedHand, FingerCount } from '../types'
  */
 const FINGER_TIPS = [8, 12, 16, 20] // index, middle, ring, pinky
 const FINGER_PIPS = [6, 10, 14, 18]
-const MIN_CONFIDENCE = 0.5
-const THUMB_EXTEND_RATIO = 1.15 // tip must be at least 15% farther out than base
+const THUMB_EXTEND_RATIO = 1.1 // tip must be at least 10% farther out than base
 
 function distance(
   a: { x: number; y: number },
@@ -18,9 +17,6 @@ function distance(
 
 export function countFingers(hand: DetectedHand): FingerCount {
   if (!hand || !hand.landmarks || hand.landmarks.length !== 21) {
-    return null
-  }
-  if (hand.score < MIN_CONFIDENCE) {
     return null
   }
 
@@ -34,17 +30,19 @@ export function countFingers(hand: DetectedHand): FingerCount {
     }
   }
 
-  // Thumb: distance-based, handedness-agnostic.
-  // Compare thumb tip's distance from the index-finger base (landmark 5)
-  // against the thumb's own base joint's distance from the same point.
-  // When the thumb is extended outward, the tip sits noticeably farther
-  // from the palm than when it's tucked in.
+  // Thumb: distance-based, handedness-agnostic (Euclidean distance is
+  // mirror-invariant, so this works regardless of camera mirroring or
+  // reported handedness — no hand.handedness branch needed).
+  // Reference point is the pinky-finger base (landmark 17) rather than the
+  // index base (landmark 5): it sits much farther across the palm from the
+  // thumb, so folded-vs-extended produces a bigger, more reliable distance
+  // swing than a reference right next to the thumb's own base.
   const thumbTip = lm[4]
   const thumbMcp = lm[2]
-  const indexMcp = lm[5]
+  const pinkyMcp = lm[17]
 
-  const tipDist = distance(thumbTip, indexMcp)
-  const baseDist = distance(thumbMcp, indexMcp)
+  const tipDist = distance(thumbTip, pinkyMcp)
+  const baseDist = distance(thumbMcp, pinkyMcp)
 
   const thumbExtended = tipDist > baseDist * THUMB_EXTEND_RATIO
   if (thumbExtended) {
