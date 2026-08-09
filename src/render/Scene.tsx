@@ -1,5 +1,9 @@
 import { useEffect, useRef } from 'react'
 import * as THREE from 'three'
+import { EffectComposer } from 'three/examples/jsm/postprocessing/EffectComposer.js'
+import { RenderPass } from 'three/examples/jsm/postprocessing/RenderPass.js'
+import { UnrealBloomPass } from 'three/examples/jsm/postprocessing/UnrealBloomPass.js'
+import { OutputPass } from 'three/examples/jsm/postprocessing/OutputPass.js'
 import type { Telemetry } from '../types'
 
 interface SceneProps {
@@ -10,6 +14,33 @@ interface SceneProps {
 const ALTITUDE_SCALE = 0.05 // meters -> scene units, tune for visual pacing
 const GROUND_CLOUD_COUNT = 260
 const GROUND_CLOUD_WINDOW = 3.0 // seconds after ignition the cloud keeps billowing
+
+// Standard three-stop "sky dome" gradient shader: world-space height (y of the
+// normalized direction from the sphere's center) drives two chained mixes,
+// bottom->mid->top. Static uniforms only — no per-frame recalculation.
+const SKY_VERTEX_SHADER = `
+  varying vec3 vWorldPosition;
+  void main() {
+    vec4 worldPosition = modelMatrix * vec4(position, 1.0);
+    vWorldPosition = worldPosition.xyz;
+    gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+  }
+`
+const SKY_FRAGMENT_SHADER = `
+  uniform vec3 topColor;
+  uniform vec3 midColor;
+  uniform vec3 bottomColor;
+  uniform float offset;
+  uniform float exponent;
+  varying vec3 vWorldPosition;
+  void main() {
+    float h = normalize(vWorldPosition).y;
+    float t = clamp(pow(max(h + offset, 0.0), exponent), 0.0, 1.0);
+    vec3 color = mix(bottomColor, midColor, smoothstep(0.0, 0.5, t));
+    color = mix(color, topColor, smoothstep(0.5, 1.0, t));
+    gl_FragColor = vec4(color, 1.0);
+  }
+`
 
 export function Scene({ telemetryRef, launched }: SceneProps) {
   const mountRef = useRef<HTMLDivElement>(null)
@@ -31,8 +62,32 @@ export function Scene({ telemetryRef, launched }: SceneProps) {
 
     // ---- Core scene setup ----
     const scene = new THREE.Scene()
-    scene.background = new THREE.Color(0x0a0a12)
-    scene.fog = new THREE.Fog(0x0a0a12, 20, 80)
+
+    // Sky gradient dome — large inverted sphere, static shader (no per-frame
+    // uniform updates). Deep-space top, blue-purple midtone, warm horizon
+    // glow at the bottom for a dawn-launch feel.
+    const skyUniforms = {
+      topColor: { value: new THREE.Color(0x00000f) },
+      midColor: { value: new THREE.Color(0x241a3d) },
+      bottomColor: { value: new THREE.Color(0xe0875f) },
+      offset: { value: 0.05 },
+      exponent: { value: 0.5 }
+    }
+    const sky = new THREE.Mesh(
+      new THREE.SphereGeometry(500, 48, 32),
+      new THREE.ShaderMaterial({
+        uniforms: skyUniforms,
+        vertexShader: SKY_VERTEX_SHADER,
+        fragmentShader: SKY_FRAGMENT_SHADER,
+        side: THREE.BackSide,
+        depthWrite: false
+      })
+    )
+    scene.add(sky)
+
+    // Fog color roughly matches the sky's horizon glow so distant geometry
+    // fades into the gradient instead of a mismatched flat-color wall.
+    scene.fog = new THREE.Fog(0xcf7c5c, 20, 80)
 
     const camera = new THREE.PerspectiveCamera(50, width / height, 0.1, 1000)
     camera.position.set(9, 4, 13)
@@ -68,9 +123,51 @@ export function Scene({ telemetryRef, launched }: SceneProps) {
     scene.add(fill)
 
     // ---- Launch pad ----
+    // Procedural grating/panel-seam texture — same canvas-texture technique as
+    // the scorch mark below, generated up front instead of loaded as an asset.
+    const padCanvas = document.createElement('canvas')
+    padCanvas.width = 256
+    padCanvas.height = 256
+    const padCtx = padCanvas.getContext('2d')!
+    padCtx.fillStyle = '#2f2f33'
+    padCtx.fillRect(0, 0, 256, 256)
+    for (let i = 0; i < 1200; i++) {
+      const x = Math.random() * 256
+      const y = Math.random() * 256
+      const shade = 35 + Math.random() * 30
+      padCtx.fillStyle = `rgba(${shade}, ${shade}, ${shade + 4}, ${0.1 + Math.random() * 0.2})`
+      padCtx.fillRect(x, y, 1, 1)
+    }
+    padCtx.strokeStyle = 'rgba(10,10,12,0.85)'
+    padCtx.lineWidth = 3
+    const padCell = 256 / 4
+    for (let i = 0; i <= 4; i++) {
+      padCtx.beginPath()
+      padCtx.moveTo(i * padCell, 0)
+      padCtx.lineTo(i * padCell, 256)
+      padCtx.stroke()
+      padCtx.beginPath()
+      padCtx.moveTo(0, i * padCell)
+      padCtx.lineTo(256, i * padCell)
+      padCtx.stroke()
+    }
+    padCtx.fillStyle = 'rgba(15,15,17,0.9)'
+    for (let gx = 0; gx < 4; gx++) {
+      for (let gy = 0; gy < 4; gy++) {
+        padCtx.beginPath()
+        padCtx.arc(gx * padCell + 8, gy * padCell + 8, 2.5, 0, Math.PI * 2)
+        padCtx.fill()
+      }
+    }
+    const padTexture = new THREE.CanvasTexture(padCanvas)
+    padTexture.wrapS = THREE.RepeatWrapping
+    padTexture.wrapT = THREE.RepeatWrapping
+    padTexture.repeat.set(3, 3)
+
     const padGeo = new THREE.CylinderGeometry(2, 2.2, 0.5, 24)
     const padMat = new THREE.MeshStandardMaterial({
-      color: 0x3a3a3a,
+      color: 0xffffff,
+      map: padTexture,
       roughness: 0.8,
       metalness: 0.3
     })
@@ -87,8 +184,40 @@ export function Scene({ telemetryRef, launched }: SceneProps) {
     scene.add(tower)
 
     // Ground plane for scale reference
+    // Procedural mottled dirt/gravel texture — fine speckle grain plus sparse
+    // larger flecks; deliberately no large-scale features, so tiling across
+    // the 80x80 plane doesn't show obvious seams.
+    const groundCanvas = document.createElement('canvas')
+    groundCanvas.width = 512
+    groundCanvas.height = 512
+    const groundCtx = groundCanvas.getContext('2d')!
+    groundCtx.fillStyle = '#17151a'
+    groundCtx.fillRect(0, 0, 512, 512)
+    for (let i = 0; i < 6000; i++) {
+      const x = Math.random() * 512
+      const y = Math.random() * 512
+      const shade = 15 + Math.random() * 35
+      groundCtx.fillStyle = `rgba(${shade + 10}, ${shade + 8}, ${shade + 12}, ${0.15 + Math.random() * 0.25})`
+      groundCtx.beginPath()
+      groundCtx.arc(x, y, 0.6 + Math.random() * 1.8, 0, Math.PI * 2)
+      groundCtx.fill()
+    }
+    for (let i = 0; i < 220; i++) {
+      const x = Math.random() * 512
+      const y = Math.random() * 512
+      const shade = 40 + Math.random() * 60
+      groundCtx.fillStyle = `rgba(${shade}, ${shade - 6}, ${shade - 10}, ${0.3 + Math.random() * 0.3})`
+      groundCtx.beginPath()
+      groundCtx.arc(x, y, 1.5 + Math.random() * 3, 0, Math.PI * 2)
+      groundCtx.fill()
+    }
+    const groundTexture = new THREE.CanvasTexture(groundCanvas)
+    groundTexture.wrapS = THREE.RepeatWrapping
+    groundTexture.wrapT = THREE.RepeatWrapping
+    groundTexture.repeat.set(16, 16)
+
     const groundGeo = new THREE.PlaneGeometry(80, 80)
-    const groundMat = new THREE.MeshStandardMaterial({ color: 0x14141c })
+    const groundMat = new THREE.MeshStandardMaterial({ color: 0xffffff, map: groundTexture })
     const ground = new THREE.Mesh(groundGeo, groundMat)
     ground.rotation.x = -Math.PI / 2
     ground.position.y = -0.5
@@ -296,6 +425,20 @@ export function Scene({ telemetryRef, launched }: SceneProps) {
     scene.add(groundCloud)
     groundCloudRef.current = groundCloud
 
+    // ---- Post-processing: bloom so exhaust/ignition particles read as glowing ----
+    const composer = new EffectComposer(renderer)
+    composer.setSize(width, height)
+    composer.setPixelRatio(Math.min(window.devicePixelRatio, 2))
+    composer.addPass(new RenderPass(scene, camera))
+    // Threshold kept high so only the brightest pixels (exhaust orange, pad
+    // highlights) trigger bloom rather than the whole lit scene — tune live,
+    // this is a first-pass estimate.
+    const bloomPass = new UnrealBloomPass(new THREE.Vector2(width, height), 1.1, 0.4, 0.8)
+    composer.addPass(bloomPass)
+    // Required since three r152+: EffectComposer no longer applies the
+    // renderer's output color-space transform automatically.
+    composer.addPass(new OutputPass())
+
     // ---- Render loop ----
     function animate() {
       const telemetry = telemetryRef.current
@@ -380,7 +523,7 @@ export function Scene({ telemetryRef, launched }: SceneProps) {
         posAttr.needsUpdate = true
       }
 
-      renderer.render(scene, camera)
+      composer.render()
       rafRef.current = requestAnimationFrame(animate)
     }
     animate()
@@ -393,6 +536,7 @@ export function Scene({ telemetryRef, launched }: SceneProps) {
       camera.aspect = w / h
       camera.updateProjectionMatrix()
       renderer.setSize(w, h, true)
+      composer.setSize(w, h)
     }
 
     let resizeObserver: ResizeObserver | null = null
@@ -410,6 +554,7 @@ export function Scene({ telemetryRef, launched }: SceneProps) {
       } else {
         window.removeEventListener('resize', handleResize)
       }
+      composer.dispose()
       renderer.dispose()
       mount.removeChild(renderer.domElement)
     }
