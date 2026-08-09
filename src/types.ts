@@ -35,10 +35,28 @@ export interface RocketParams {
 export type FlightStage = 'pre-launch' | 'powered-ascent' | 'coast' | 'apogee' | 'descent'
 
 export interface Telemetry {
-  time: number // seconds since launch
-  altitude: number // meters
-  velocity: number // m/s, positive = up
-  acceleration: number // m/s^2
-  mass: number // kg, current total mass
+  time: number
+  altitude: number
+  velocity: number
+  acceleration: number
+  mass: number
   stage: FlightStage
+  lateralOffset: number // meters, horizontal drift from wind
+}
+
+// Phase 3: Sarcastic commentary
+export type CommentaryTrigger =
+  | 'countdown'
+  | 'pre-launch'
+  | 'ignition'
+  | 'max-q'
+  | 'burnout'
+  | 'coast'
+  | 'apogee'
+  | 'descent'
+  | 'landed'
+
+export interface CommentaryLine {
+  trigger: CommentaryTrigger
+  text: string
 }
