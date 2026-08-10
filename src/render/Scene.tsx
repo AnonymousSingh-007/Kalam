@@ -454,11 +454,11 @@ export function Scene({ telemetryRef, launched }: SceneProps) {
         const zoomFactor = Math.min(r.position.y / 15, 1)
         const baseCamY = 4
         const camY = baseCamY + r.position.y
-        const offsetX = 9 + zoomFactor * 6
+        const offsetX = r.position.x + 9 + zoomFactor * 6
         const offsetZ = 13 + zoomFactor * 9
         camera.position.set(offsetX, camY, offsetZ)
 
-        const lookTarget = new THREE.Vector3(0, r.position.y + 1, 0)
+        const lookTarget = new THREE.Vector3(r.position.x, r.position.y + 1, 0)
         camera.lookAt(lookTarget)
       }
 
