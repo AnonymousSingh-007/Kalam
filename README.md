@@ -79,7 +79,7 @@ src/
 
 ## Built by
 
-**Samratth Singh** (lead) · **Lakshit Saini** (Three.js render + post-processing)
+**Samratth Singh**  · **Lakshit Saini** 
 
 ---
 
