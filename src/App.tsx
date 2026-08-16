@@ -4,7 +4,6 @@ import { countFingers } from './hand/fingerCount'
 import { CountdownMachine } from './state/countdownMachine'
 import { RocketPhysicsEngine } from './physics/rocketPhysics'
 import { CommentaryEngine } from './commentary/commentaryEngine'
-import { getRandomLine } from './commentary/lines'
 import { ParamPanel } from './ui/ParamPanel'
 import { InstrumentPanel } from './ui/InstrumentPanel'
 import { Scene } from './render/Scene'
@@ -12,6 +11,20 @@ import type { CountdownState, Telemetry, RocketParams } from './types'
 import './App.css'
 
 const machine = new CountdownMachine()
+
+const EMPTY_TELEMETRY: Telemetry = {
+  time: 0,
+  altitude: 0,
+  velocity: 0,
+  acceleration: 0,
+  mass: 0,
+  stage: 'pre-launch',
+  lateralOffset: 0,
+  lateralVelocity: 0,
+  angleOfAttack: 0,
+  axialGLoad: 0,
+  lateralGLoad: 0
+}
 
 function App() {
   const videoRef = useRef<HTMLVideoElement>(null)
@@ -65,14 +78,18 @@ function App() {
         )
         machine.tick(reading)
 
+        // Countdown chatter — fires occasionally while counting down
         if (machine.getState().phase === 'counting' && Math.random() < 0.02) {
-          const line = getRandomLine('countdown')
+          const snap = engineRef.current?.snapshot() ?? EMPTY_TELEMETRY
+          const line = commentaryEngineRef.current.fireCountdown(snap)
           if (line) setCommentary(line)
         }
       }
 
       if (engineRef.current && timestamp !== undefined) {
-        const dt = lastTimeRef.current ? (timestamp - lastTimeRef.current) / 1000 : 1 / 60
+        const dt = lastTimeRef.current
+          ? (timestamp - lastTimeRef.current) / 1000
+          : 1 / 60
         lastTimeRef.current = timestamp
         telemetryRef.current = engineRef.current.step(Math.min(dt, 1 / 30))
 
@@ -81,8 +98,11 @@ function App() {
           const airDensity = 1.225 * Math.exp(-t.altitude / 8500)
           const line = commentaryEngineRef.current.tick(t, airDensity)
           if (line) setCommentary(line)
+
           if (t.altitude <= 0 && t.stage === 'descent' && t.time > 1) {
-            setCommentary((prev) => prev || commentaryEngineRef.current.fireLanded())
+            setCommentary((prev) =>
+              prev || commentaryEngineRef.current.fireLanded(t)
+            )
           }
 
           // Throttle UI telemetry updates to ~5x/sec instead of every frame
@@ -107,7 +127,6 @@ function App() {
   useEffect(() => {
     if (!commentary) return
     if (!('speechSynthesis' in window)) return
-
     window.speechSynthesis.cancel()
     const utterance = new SpeechSynthesisUtterance(commentary)
     utterance.rate = 1.05
@@ -124,7 +143,8 @@ function App() {
     machine.launch()
     setLaunched(true)
     commentaryEngineRef.current.reset()
-    setCommentary(commentaryEngineRef.current.firePreLaunch())
+    const snap = engine.snapshot()
+    setCommentary(commentaryEngineRef.current.firePreLaunch(snap))
   }
 
   const phaseLabel: Record<CountdownState['phase'], string> = {
@@ -164,7 +184,10 @@ function App() {
         <aside className="side-dock">
           <ParamPanel onLaunch={handleLaunch} disabled={state.phase !== 'armed'} />
 
-          <button className="debug-toggle" onClick={() => setShowDebug((s) => !s)}>
+          <button
+            className="debug-toggle"
+            onClick={() => setShowDebug((s) => !s)}
+          >
             {showDebug ? 'Hide' : 'Show'} diagnostics
           </button>
 
