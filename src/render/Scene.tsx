@@ -4,6 +4,7 @@ import { EffectComposer } from 'three/examples/jsm/postprocessing/EffectComposer
 import { RenderPass } from 'three/examples/jsm/postprocessing/RenderPass.js'
 import { UnrealBloomPass } from 'three/examples/jsm/postprocessing/UnrealBloomPass.js'
 import { OutputPass } from 'three/examples/jsm/postprocessing/OutputPass.js'
+import { ShaderPass } from 'three/examples/jsm/postprocessing/ShaderPass.js'
 import type { Telemetry } from '../types'
 
 interface SceneProps {
@@ -14,6 +15,14 @@ interface SceneProps {
 const ALTITUDE_SCALE = 0.05
 const GROUND_CLOUD_COUNT = 260
 const GROUND_CLOUD_WINDOW = 3.0
+const TRENCH_CLOUD_COUNT = 140
+
+// Telemetry has no explicit max-Q marker (commentaryEngine derives it dynamically
+// from a running dynamic-pressure peak that isn't exposed on Telemetry, and that
+// file is out of scope to touch). Stand-in: peak heat-shimmer intensity at a fixed
+// altitude within the 500-2000m band the task suggested as an approximation.
+const HEAT_PEAK_ALTITUDE = 1200 // meters
+const HEAT_SCALE_HEIGHT = 8500 // meters — matches rocketPhysics.ts SCALE_HEIGHT (read-only reference, not imported)
 
 // ---- Plume expansion shader ----
 // Models the nozzle exit to far-field exhaust transition as a function of
@@ -28,6 +37,7 @@ const PLUME_VERTEX = `
   uniform float time;
   varying float vY;
   varying float vRadius;
+  varying float vFresnel;
 
   void main() {
     vec3 pos = position;
@@ -50,7 +60,20 @@ const PLUME_VERTEX = `
 
     vY = t;
     vRadius = baseRadius;
-    gl_Position = projectionMatrix * modelViewMatrix * vec4(pos, 1.0);
+
+    vec4 mvPosition = modelViewMatrix * vec4(pos, 1.0);
+
+    // Rim/edge softening term: view-facing fragments (fresnel≈0) stay solid,
+    // grazing-angle silhouette fragments (fresnel≈1) fade in the fragment
+    // shader so the mesh boundary dissolves into gas instead of reading as a
+    // hard cutout edge. Uses the pre-displacement normal as a cheap approximation
+    // — exact renormalization after the radial displacement above isn't worth
+    // the cost for a soft stylized effect like this.
+    vec3 transformedNormal = normalize(normalMatrix * normal);
+    vec3 viewDir = normalize(-mvPosition.xyz);
+    vFresnel = 1.0 - abs(dot(viewDir, transformedNormal));
+
+    gl_Position = projectionMatrix * mvPosition;
   }
 `
 
@@ -58,6 +81,7 @@ const PLUME_FRAGMENT = `
   uniform float expansionFactor;
   varying float vY;
   varying float vRadius;
+  varying float vFresnel;
 
   void main() {
     // Core: white-hot near nozzle, transitions orange → red → transparent at edge/tip
@@ -76,6 +100,15 @@ const PLUME_FRAGMENT = `
     // At vacuum (expansionFactor=1) the plume is wide but dimmer at edges —
     // less dense gas means less emission per unit volume
     float opacity = (1.0 - vY * 0.85) * (0.9 - expansionFactor * 0.3);
+
+    // Silhouette softening: fade opacity toward the grazing-angle rim instead
+    // of cutting off hard at the mesh's geometric edge. Floor (rather than a
+    // fade to 0) keeps the plume from vanishing entirely at mostly-side-on
+    // camera angles, where nearly the whole visible surface is near-grazing.
+    float rimSoftness = 2.2;
+    float edgeFade = 1.0 - pow(vFresnel, rimSoftness);
+    opacity *= mix(0.35, 1.0, edgeFade);
+
     opacity = clamp(opacity, 0.0, 1.0);
 
     gl_FragColor = vec4(color, opacity);
@@ -118,6 +151,52 @@ const TRENCH_FRAGMENT = `
   }
 `
 
+// ---- Atmospheric heat scintillation (post-process) ----
+// Refracts the rendered frame with time-varying turbulence, masked to a
+// radius around the rocket's projected screen position so it reads as heat
+// haze around the vehicle rather than a full-screen distortion.
+const HEAT_VERTEX_SHADER = `
+  varying vec2 vUv;
+  void main() {
+    vUv = uv;
+    gl_Position = vec4(position.xy, 0.0, 1.0);
+  }
+`
+const HEAT_FRAGMENT_SHADER = `
+  uniform sampler2D tDiffuse;
+  uniform float time;
+  uniform float strength;
+  uniform float frequency;
+  uniform float aspect;
+  uniform vec2 rocketScreenPos;
+  uniform float maskRadius;
+  varying vec2 vUv;
+
+  // Compact sin/cos turbulence — not true Perlin/Simplex, cheap and
+  // sufficient for a subtle shimmer.
+  float turbulence(vec2 p, float t) {
+    float n = sin(p.x + t * 2.0) * cos(p.y * 1.3 - t * 1.7);
+    n += 0.5 * sin(p.x * 2.1 - t * 3.1) * cos(p.y * 1.7 + t * 2.3);
+    return n * 0.6667;
+  }
+
+  void main() {
+    vec2 uv = vUv;
+
+    vec2 d = uv - rocketScreenPos;
+    d.x *= aspect;
+    float dist = length(d);
+    float mask = 1.0 - smoothstep(0.0, maskRadius, dist);
+
+    vec2 p = uv * frequency;
+    float nx = turbulence(p, time);
+    float ny = turbulence(p + 17.0, time);
+    vec2 offset = vec2(nx, ny) * strength * mask;
+
+    gl_FragColor = texture2D(tDiffuse, uv + offset);
+  }
+`
+
 const SKY_VERTEX_SHADER = `
   varying vec3 vWorldPosition;
   void main() {
@@ -156,6 +235,10 @@ export function Scene({ telemetryRef, launched }: SceneProps) {
   const trenchRightRef = useRef<THREE.Mesh | null>(null)
   const trenchLeftMatRef = useRef<THREE.ShaderMaterial | null>(null)
   const trenchRightMatRef = useRef<THREE.ShaderMaterial | null>(null)
+  const trenchCloudRef = useRef<THREE.Points | null>(null)
+  const trenchCloudVel = useRef<Float32Array | null>(null)
+  const trenchCloudAge = useRef<Float32Array | null>(null)
+  const heatStrengthRef = useRef<{ value: number } | null>(null)
   const rafRef = useRef<number>(0)
   const clockRef = useRef(new THREE.Clock())
 
@@ -348,6 +431,48 @@ export function Scene({ telemetryRef, launched }: SceneProps) {
     trenchLeftMatRef.current = trenchLeftMat
     trenchRightMatRef.current = trenchRightMat
 
+    // ---- Flame trench volumetric billboard cloud ----
+    // Layered on top of the flat shader-plane trench fans above to add
+    // billowing bulk — the fans alone read as a flat sheet. Soft circular
+    // puff texture, same canvas-texture technique as the scorch mark.
+    const trenchCloudCanvas = document.createElement('canvas')
+    trenchCloudCanvas.width = 64
+    trenchCloudCanvas.height = 64
+    const tcCtx = trenchCloudCanvas.getContext('2d')!
+    const tcGrad = tcCtx.createRadialGradient(32, 32, 0, 32, 32, 32)
+    tcGrad.addColorStop(0, 'rgba(255,255,255,0.9)')
+    tcGrad.addColorStop(0.4, 'rgba(255,220,180,0.5)')
+    tcGrad.addColorStop(1, 'rgba(255,180,120,0)')
+    tcCtx.fillStyle = tcGrad
+    tcCtx.fillRect(0, 0, 64, 64)
+    const trenchCloudTexture = new THREE.CanvasTexture(trenchCloudCanvas)
+
+    const trenchCloudPositions = new Float32Array(TRENCH_CLOUD_COUNT * 3)
+    const trenchCloudVelocities = new Float32Array(TRENCH_CLOUD_COUNT * 3)
+    const trenchCloudAges = new Float32Array(TRENCH_CLOUD_COUNT)
+    for (let i = 0; i < TRENCH_CLOUD_COUNT; i++) {
+      trenchCloudPositions[i * 3 + 1] = -100
+      trenchCloudAges[i] = 999
+    }
+    trenchCloudVel.current = trenchCloudVelocities
+    trenchCloudAge.current = trenchCloudAges
+
+    const trenchCloudGeo = new THREE.BufferGeometry()
+    trenchCloudGeo.setAttribute('position', new THREE.BufferAttribute(trenchCloudPositions, 3))
+    const trenchCloudMat = new THREE.PointsMaterial({
+      map: trenchCloudTexture,
+      color: 0xffbb77,
+      size: 1.4,
+      transparent: true,
+      opacity: 0,
+      depthWrite: false,
+      sizeAttenuation: true,
+      blending: THREE.AdditiveBlending
+    })
+    const trenchCloud = new THREE.Points(trenchCloudGeo, trenchCloudMat)
+    scene.add(trenchCloud)
+    trenchCloudRef.current = trenchCloud
+
     // ============================================================
     // ROCKET GEOMETRY (unchanged from Lakshit's version)
     // ============================================================
@@ -441,9 +566,32 @@ export function Scene({ telemetryRef, launched }: SceneProps) {
     composer.setSize(width, height)
     composer.setPixelRatio(Math.min(window.devicePixelRatio, 2))
     composer.addPass(new RenderPass(scene, camera))
+
+    // Heat scintillation — inserted before bloom so bloom applies to the
+    // already-distorted image, not before it.
+    const heatUniforms = {
+      tDiffuse: { value: null as THREE.Texture | null },
+      time: { value: 0 },
+      strength: { value: 0 },
+      frequency: { value: 6.0 },
+      aspect: { value: width / height },
+      rocketScreenPos: { value: new THREE.Vector2(0.5, 0.5) },
+      maskRadius: { value: 0.35 }
+    }
+    heatStrengthRef.current = heatUniforms.strength
+    const heatPass = new ShaderPass({
+      uniforms: heatUniforms,
+      vertexShader: HEAT_VERTEX_SHADER,
+      fragmentShader: HEAT_FRAGMENT_SHADER
+    })
+    composer.addPass(heatPass)
+
     const bloomPass = new UnrealBloomPass(new THREE.Vector2(width, height), 1.1, 0.4, 0.8)
     composer.addPass(bloomPass)
     composer.addPass(new OutputPass())
+
+    // Reused each frame to avoid allocating a Vector3 in the render loop.
+    const rocketWorldPos = new THREE.Vector3()
 
     // ---- Render loop ----
     function animate() {
@@ -517,6 +665,66 @@ export function Scene({ telemetryRef, launched }: SceneProps) {
             tRightMat.uniforms.progress.value = trenchProgress
           }
         }
+
+        // ---- Trench volumetric billboard cloud ----
+        // Recomputes the same active/progress values as the block above
+        // (cheap) rather than restructuring that block's scope, so the
+        // existing trigger logic stays untouched.
+        const tc = trenchCloudRef.current
+        const tcVel = trenchCloudVel.current
+        const tcAge = trenchCloudAge.current
+        if (tc && tcVel && tcAge) {
+          const trenchActiveNow = isThrusting && telemetry.altitude * ALTITUDE_SCALE < 8
+          const trenchProgressNow = Math.min(telemetry.altitude * ALTITUDE_SCALE / 8, 1.0)
+          const posAttr = tc.geometry.getAttribute('position') as THREE.BufferAttribute
+          for (let i = 0; i < TRENCH_CLOUD_COUNT; i++) {
+            const idx = i * 3
+            if (trenchActiveNow && Math.random() < 0.2) {
+              const side = Math.random() < 0.5 ? -1 : 1
+              const spread = 0.3 + trenchProgressNow * 2.2
+              posAttr.array[idx] = side * (1.2 + Math.random() * spread)
+              posAttr.array[idx + 1] = -0.35 + Math.random() * 0.25
+              posAttr.array[idx + 2] = (Math.random() - 0.5) * 1.4
+              tcVel[idx] = side * (0.02 + Math.random() * 0.03)
+              tcVel[idx + 1] = 0.005 + Math.random() * 0.01
+              tcVel[idx + 2] = (Math.random() - 0.5) * 0.02
+              tcAge[i] = 0
+            } else if (tcAge[i] < 1.5) {
+              posAttr.array[idx] += tcVel[idx]
+              posAttr.array[idx + 1] += tcVel[idx + 1]
+              posAttr.array[idx + 2] += tcVel[idx + 2]
+              tcAge[i] += 1 / 60
+            } else if (posAttr.array[idx + 1] !== -100) {
+              posAttr.array[idx + 1] = -100
+            }
+          }
+          posAttr.needsUpdate = true
+          ;(tc.material as THREE.PointsMaterial).opacity = trenchActiveNow
+            ? 0.7 * (1.0 - trenchProgressNow * 0.85)
+            : 0
+        }
+
+        // ---- Heat scintillation ----
+        // Gated on powered-ascent (no shimmer when the engine isn't heating
+        // the air column) and shaped by altitude: ramps up over the first
+        // ~400m as the rocket clears the pad, holds through the max-Q
+        // stand-in band (see HEAT_PEAK_ALTITUDE), then fades using the same
+        // 8500m scale height as the air-density model.
+        const alt = telemetry.altitude
+        const heatRampUp = Math.min(alt / 400, 1.0)
+        const heatThinAirFalloff = Math.exp(-Math.max(alt - HEAT_PEAK_ALTITUDE, 0) / HEAT_SCALE_HEIGHT)
+        const heatTarget = isThrusting ? 0.008 * heatRampUp * heatThinAirFalloff : 0
+        // Ease toward target instead of snapping, so engine cutoff doesn't
+        // produce a visible pop in the distortion.
+        heatUniforms.strength.value += (heatTarget - heatUniforms.strength.value) * 0.1
+        heatUniforms.time.value = t
+
+        rocketWorldPos.set(r.position.x, r.position.y + 1, r.position.z)
+        rocketWorldPos.project(camera)
+        heatUniforms.rocketScreenPos.value.set(
+          (rocketWorldPos.x + 1) / 2,
+          (rocketWorldPos.y + 1) / 2
+        )
       }
 
       if (p && telemetry) {
@@ -577,6 +785,7 @@ export function Scene({ telemetryRef, launched }: SceneProps) {
       if (w === 0 || h === 0) return
       camera.aspect = w / h; camera.updateProjectionMatrix()
       renderer.setSize(w, h, true); composer.setSize(w, h)
+      heatUniforms.aspect.value = w / h
     }
     let resizeObserver: ResizeObserver | null = null
     if (typeof ResizeObserver !== 'undefined') {
@@ -588,6 +797,10 @@ export function Scene({ telemetryRef, launched }: SceneProps) {
     return () => {
       cancelAnimationFrame(rafRef.current)
       if (resizeObserver) { resizeObserver.disconnect() } else { window.removeEventListener('resize', handleResize) }
+      // EffectComposer.dispose() only frees its own render targets and copy
+      // pass — it does not cascade to child passes, so the new heat pass
+      // needs its own explicit dispose (its material + fullscreen quad).
+      heatPass.dispose()
       composer.dispose(); renderer.dispose(); mount.removeChild(renderer.domElement)
     }
   }, [])
@@ -604,6 +817,9 @@ export function Scene({ telemetryRef, launched }: SceneProps) {
       if (trenchRightRef.current) trenchRightRef.current.visible = false
       if (trenchLeftMatRef.current) trenchLeftMatRef.current.uniforms.progress.value = 0
       if (trenchRightMatRef.current) trenchRightMatRef.current.uniforms.progress.value = 0
+      if (trenchCloudAge.current) trenchCloudAge.current.fill(999)
+      if (trenchCloudRef.current) (trenchCloudRef.current.material as THREE.PointsMaterial).opacity = 0
+      if (heatStrengthRef.current) heatStrengthRef.current.value = 0
     }
   }, [launched])
 
