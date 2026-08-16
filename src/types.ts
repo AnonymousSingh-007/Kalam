@@ -59,6 +59,9 @@ export type CommentaryTrigger =
   | 'apogee'
   | 'descent'
   | 'landed'
+  | 'high-g'
+  | 'high-aoa'
+  | 'fast-descent''
 
 export interface CommentaryLine {
   trigger: CommentaryTrigger
