@@ -4,6 +4,7 @@ const GRAVITY_SEA_LEVEL = 9.81
 const EARTH_RADIUS = 6_371_000
 const AIR_DENSITY_SEA_LEVEL = 1.225
 const SCALE_HEIGHT = 8500
+const RAD_TO_DEG = 180 / Math.PI
 
 export class RocketPhysicsEngine {
   private params: RocketParams
@@ -15,10 +16,10 @@ export class RocketPhysicsEngine {
   private maxAltitudeReached = 0
   private hasBurnedOut = false
 
-  // Wind drift state
-  private windDirection = 1 // +1 or -1, randomized per launch
-  private windStrength = 0 // N, randomized per launch, constant through flight
+  private windDirection = 1
+  private windStrength = 0
   private lateralVelocity = 0
+  private lateralAcceleration = 0
   private lateralOffset = 0
 
   constructor(params: RocketParams) {
@@ -35,6 +36,7 @@ export class RocketPhysicsEngine {
     this.maxAltitudeReached = 0
     this.hasBurnedOut = false
     this.lateralVelocity = 0
+    this.lateralAcceleration = 0
     this.lateralOffset = 0
   }
 
@@ -60,8 +62,6 @@ export class RocketPhysicsEngine {
     return AIR_DENSITY_SEA_LEVEL * Math.exp(-altitude / SCALE_HEIGHT)
   }
 
-  // Thrust ramps from 0 to full over 0.4s at ignition, instead of snapping —
-  // real engines aren't instant-on.
   private thrustRampFactor(): number {
     const RAMP_TIME = 0.4
     if (this.time >= RAMP_TIME) return 1
@@ -78,17 +78,12 @@ export class RocketPhysicsEngine {
     const g = this.gravityAt(this.altitude)
     const rho = this.airDensityAt(this.altitude)
 
+    // ---- Vertical axis ----
     const thrustForce = burning ? this.params.thrust * this.thrustRampFactor() : 0
     const weightForce = mass * g
-
     const dragForce =
-      0.5 *
-      rho *
-      this.velocity *
-      Math.abs(this.velocity) *
-      this.params.dragCoefficient *
-      this.params.crossSectionArea
-
+      0.5 * rho * this.velocity * Math.abs(this.velocity) *
+      this.params.dragCoefficient * this.params.crossSectionArea
     const netForce = thrustForce - weightForce - dragForce
     this.acceleration = netForce / mass
 
@@ -96,24 +91,34 @@ export class RocketPhysicsEngine {
     this.altitude += this.velocity * dt
     this.time += dt
 
-    // Lateral wind drift: constant small force, opposed by lateral drag
-    // proportional to lateral speed. Only meaningfully affects the rocket
-    // while it's moving slowly (near launch) or during unpowered descent —
-    // at high vertical speed the effect is naturally small relative to
-    // altitude gained, which matches how real wind drift behaves.
+    // ---- Lateral axis ----
     const lateralDragForce =
-      0.5 *
-      rho *
-      this.lateralVelocity *
-      Math.abs(this.lateralVelocity) *
-      this.params.dragCoefficient *
-      this.params.crossSectionArea *
-      0.6 // lateral cross-section is smaller than frontal, rough approximation
-
+      0.5 * rho * this.lateralVelocity * Math.abs(this.lateralVelocity) *
+      this.params.dragCoefficient * this.params.crossSectionArea * 0.6
     const lateralForce = this.windDirection * this.windStrength - lateralDragForce
-    const lateralAccel = lateralForce / mass
-    this.lateralVelocity += lateralAccel * dt
+    this.lateralAcceleration = lateralForce / mass
+    this.lateralVelocity += this.lateralAcceleration * dt
     this.lateralOffset += this.lateralVelocity * dt
+
+    // ---- Derived instruments ----
+    // Angle of Attack: angle between body axis (vertical) and velocity vector.
+    // atan2(lateralVelocity, verticalVelocity) gives the flow angle in radians.
+    // At zero vertical velocity (apogee) this would spike — clamp to ±90 deg.
+    const speed = Math.sqrt(this.velocity * this.velocity + this.lateralVelocity * this.lateralVelocity)
+    const angleOfAttack = speed > 0.1
+      ? Math.atan2(Math.abs(this.lateralVelocity), Math.abs(this.velocity)) * RAD_TO_DEG
+      : 0
+
+    // Axial g-load: specific force along thrust axis = (thrust - drag) / mass / g0
+    // This is what an accelerometer bolted to the rocket actually reads.
+    // Gravity is NOT included — an accelerometer in free fall reads 0g.
+    // At rest on the pad it reads +1g (normal force from ground).
+    const specificForceAxial = (thrustForce - dragForce) / mass
+    const axialGLoad = specificForceAxial / GRAVITY_SEA_LEVEL
+
+    // Lateral g-load: specific force on lateral axis
+    const specificForceLateral = this.lateralAcceleration
+    const lateralGLoad = specificForceLateral / GRAVITY_SEA_LEVEL
 
     if (!burning && !this.hasBurnedOut) {
       this.hasBurnedOut = true
@@ -127,20 +132,15 @@ export class RocketPhysicsEngine {
     this.maxAltitudeReached = Math.max(this.maxAltitudeReached, this.altitude)
     this.updateStage()
 
-    return this.snapshot()
+    return this.snapshot(angleOfAttack, axialGLoad, lateralGLoad)
   }
 
   private updateStage(): void {
     const burning = this.isBurning()
-
     if (this.altitude <= 0 && this.hasBurnedOut && this.velocity <= 0) {
-      this.stage = 'descent'
-      return
+      this.stage = 'descent'; return
     }
-    if (burning) {
-      this.stage = 'powered-ascent'
-      return
-    }
+    if (burning) { this.stage = 'powered-ascent'; return }
     const nearPeak = this.altitude >= this.maxAltitudeReached - 0.05
     if (this.velocity > 0.5) {
       this.stage = 'coast'
@@ -154,15 +154,16 @@ export class RocketPhysicsEngine {
   launch(): void {
     if (this.stage === 'pre-launch') {
       this.stage = 'powered-ascent'
-      // Randomize wind per launch: direction and a modest strength band.
-      // Strength scaled relative to typical thrust so it's felt but not
-      // dominant — roughly 0.5-2% of thrust force as a steady crosswind push.
       this.windDirection = Math.random() < 0.5 ? -1 : 1
       this.windStrength = this.params.thrust * (0.005 + Math.random() * 0.015)
     }
   }
 
-  snapshot(): Telemetry {
+  snapshot(
+    angleOfAttack = 0,
+    axialGLoad = 0,
+    lateralGLoad = 0
+  ): Telemetry {
     return {
       time: this.time,
       altitude: this.altitude,
@@ -170,7 +171,11 @@ export class RocketPhysicsEngine {
       acceleration: this.acceleration,
       mass: this.currentMass(),
       stage: this.stage,
-      lateralOffset: this.lateralOffset
+      lateralOffset: this.lateralOffset,
+      lateralVelocity: this.lateralVelocity,
+      angleOfAttack,
+      axialGLoad,
+      lateralGLoad
     }
   }
 }
