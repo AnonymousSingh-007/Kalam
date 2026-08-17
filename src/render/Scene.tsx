@@ -5,6 +5,7 @@ import { RenderPass } from 'three/examples/jsm/postprocessing/RenderPass.js'
 import { UnrealBloomPass } from 'three/examples/jsm/postprocessing/UnrealBloomPass.js'
 import { OutputPass } from 'three/examples/jsm/postprocessing/OutputPass.js'
 import { ShaderPass } from 'three/examples/jsm/postprocessing/ShaderPass.js'
+import { CloudLayer } from './CloudLayer'
 import type { Telemetry } from '../types'
 
 interface SceneProps {
@@ -16,24 +17,11 @@ const ALTITUDE_SCALE = 0.05
 const GROUND_CLOUD_COUNT = 260
 const GROUND_CLOUD_WINDOW = 3.0
 const TRENCH_CLOUD_COUNT = 140
+const HEAT_PEAK_ALTITUDE = 1200
+const HEAT_SCALE_HEIGHT = 8500
 
-// Telemetry has no explicit max-Q marker (commentaryEngine derives it dynamically
-// from a running dynamic-pressure peak that isn't exposed on Telemetry, and that
-// file is out of scope to touch). Stand-in: peak heat-shimmer intensity at a fixed
-// altitude within the 500-2000m band the task suggested as an approximation.
-const HEAT_PEAK_ALTITUDE = 1200 // meters
-const HEAT_SCALE_HEIGHT = 8500 // meters — matches rocketPhysics.ts SCALE_HEIGHT (read-only reference, not imported)
-
-// ---- Plume expansion shader ----
-// Models the nozzle exit to far-field exhaust transition as a function of
-// ambient pressure (altitude). At sea level the plume is over-expanded —
-// it contracts then shocks outward in a barrel/diamond pattern (visible
-// Mach discs). As altitude rises, ambient pressure drops toward zero,
-// the plume opens into a wide cone. The shader drives both geometry
-// shape (via vertex displacement) and color/opacity (core white-hot →
-// orange → transparent edge).
 const PLUME_VERTEX = `
-  uniform float expansionFactor; // 0.0 = sea level tight, 1.0 = vacuum wide
+  uniform float expansionFactor;
   uniform float time;
   varying float vY;
   varying float vRadius;
@@ -41,38 +29,19 @@ const PLUME_VERTEX = `
 
   void main() {
     vec3 pos = position;
-
-    // Base bell shape: radius grows from 0 at nozzle exit (y=0) to 1 at tip (y=-1)
     float t = clamp(-pos.y, 0.0, 1.0);
-
-    // Sea-level: tight core with periodic Mach disc pinching (sinusoidal radius oscillation)
-    // Altitude: wide open cone, no pinching
     float machDisc = 1.0 - 0.35 * sin(t * 3.14159 * 3.0) * (1.0 - expansionFactor);
     float baseRadius = t * (0.18 + expansionFactor * 0.55) * machDisc;
-
-    // Slight turbulent flutter — cheap noise via sin/cos combos, keeps it
-    // from looking like a static geometry artifact
     float flutter = 0.018 * sin(time * 8.0 + t * 12.0) * cos(time * 5.5 + t * 7.0);
     baseRadius += flutter * (0.4 + expansionFactor * 0.6);
-
     pos.x = pos.x * baseRadius * 2.0;
     pos.z = pos.z * baseRadius * 2.0;
-
     vY = t;
     vRadius = baseRadius;
-
     vec4 mvPosition = modelViewMatrix * vec4(pos, 1.0);
-
-    // Rim/edge softening term: view-facing fragments (fresnel≈0) stay solid,
-    // grazing-angle silhouette fragments (fresnel≈1) fade in the fragment
-    // shader so the mesh boundary dissolves into gas instead of reading as a
-    // hard cutout edge. Uses the pre-displacement normal as a cheap approximation
-    // — exact renormalization after the radial displacement above isn't worth
-    // the cost for a soft stylized effect like this.
     vec3 transformedNormal = normalize(normalMatrix * normal);
     vec3 viewDir = normalize(-mvPosition.xyz);
     vFresnel = 1.0 - abs(dot(viewDir, transformedNormal));
-
     gl_Position = projectionMatrix * mvPosition;
   }
 `
@@ -84,53 +53,31 @@ const PLUME_FRAGMENT = `
   varying float vFresnel;
 
   void main() {
-    // Core: white-hot near nozzle, transitions orange → red → transparent at edge/tip
-    // Temperature gradient physically: core combustion products ~3000K (white),
-    // cooling outer shear layer ~1500K (orange), ambient mix transparent
     float core = 1.0 - smoothstep(0.0, 0.35, vY);
-    float mid = smoothstep(0.0, 0.5, vY) * (1.0 - smoothstep(0.5, 1.0, vY));
+    float mid  = smoothstep(0.0, 0.5, vY) * (1.0 - smoothstep(0.5, 1.0, vY));
     float edge = smoothstep(0.6, 1.0, vY);
-
-    vec3 coreColor = vec3(1.0, 0.97, 0.88);       // white-hot
-    vec3 midColor  = vec3(1.0, 0.55, 0.12);        // orange
-    vec3 edgeColor = vec3(0.6, 0.15, 0.05);        // deep red, fades to transparent
-
+    vec3 coreColor = vec3(1.0, 0.97, 0.88);
+    vec3 midColor  = vec3(1.0, 0.55, 0.12);
+    vec3 edgeColor = vec3(0.6, 0.15, 0.05);
     vec3 color = coreColor * core + midColor * mid + edgeColor * edge;
-
-    // At vacuum (expansionFactor=1) the plume is wide but dimmer at edges —
-    // less dense gas means less emission per unit volume
     float opacity = (1.0 - vY * 0.85) * (0.9 - expansionFactor * 0.3);
-
-    // Silhouette softening: fade opacity toward the grazing-angle rim instead
-    // of cutting off hard at the mesh's geometric edge. Floor (rather than a
-    // fade to 0) keeps the plume from vanishing entirely at mostly-side-on
-    // camera angles, where nearly the whole visible surface is near-grazing.
     float rimSoftness = 2.2;
     float edgeFade = 1.0 - pow(vFresnel, rimSoftness);
     opacity *= mix(0.35, 1.0, edgeFade);
-
     opacity = clamp(opacity, 0.0, 1.0);
-
     gl_FragColor = vec4(color, opacity);
   }
 `
 
-// ---- Flame trench geometry/shader ----
-// Two horizontal exhaust fans (left/right of pad) that fire during the
-// first ~1.5s before the rocket clears the trench, then fade. Physically:
-// the deflector wedge redirects vertical exhaust flow 90 degrees outward.
-// Each "fan" is a flat cone section lying on its side — vertex shader
-// drives per-frame expansion, fragment shader gives the temperature gradient.
 const TRENCH_VERTEX = `
-  uniform float progress;  // 0.0 = T-0, 1.0 = fully expanded and fading
-  uniform float side;      // -1.0 left, +1.0 right
+  uniform float progress;
+  uniform float side;
   varying float vDist;
 
   void main() {
     vec3 pos = position;
-    // Expand the fan outward along X as time progresses
     pos.x *= (0.3 + progress * 2.2) * side;
-    pos.y = pos.y * 0.4; // keep it flat/horizontal
+    pos.y = pos.y * 0.4;
     vDist = length(pos.xz);
     gl_Position = projectionMatrix * modelViewMatrix * vec4(pos, 1.0);
   }
@@ -141,9 +88,8 @@ const TRENCH_FRAGMENT = `
   varying float vDist;
 
   void main() {
-    // Hot white near deflector origin, orange/red fading outward, dims as progress→1
     float heat = 1.0 - smoothstep(0.0, 2.5, vDist);
-    vec3 hotColor = vec3(1.0, 0.92, 0.7);
+    vec3 hotColor  = vec3(1.0, 0.92, 0.7);
     vec3 coolColor = vec3(0.8, 0.25, 0.05);
     vec3 color = mix(coolColor, hotColor, heat);
     float opacity = heat * (1.0 - progress * 0.85) * 0.9;
@@ -151,10 +97,6 @@ const TRENCH_FRAGMENT = `
   }
 `
 
-// ---- Atmospheric heat scintillation (post-process) ----
-// Refracts the rendered frame with time-varying turbulence, masked to a
-// radius around the rocket's projected screen position so it reads as heat
-// haze around the vehicle rather than a full-screen distortion.
 const HEAT_VERTEX_SHADER = `
   varying vec2 vUv;
   void main() {
@@ -162,18 +104,17 @@ const HEAT_VERTEX_SHADER = `
     gl_Position = vec4(position.xy, 0.0, 1.0);
   }
 `
+
 const HEAT_FRAGMENT_SHADER = `
   uniform sampler2D tDiffuse;
   uniform float time;
   uniform float strength;
   uniform float frequency;
   uniform float aspect;
-  uniform vec2 rocketScreenPos;
+  uniform vec2  rocketScreenPos;
   uniform float maskRadius;
   varying vec2 vUv;
 
-  // Compact sin/cos turbulence — not true Perlin/Simplex, cheap and
-  // sufficient for a subtle shimmer.
   float turbulence(vec2 p, float t) {
     float n = sin(p.x + t * 2.0) * cos(p.y * 1.3 - t * 1.7);
     n += 0.5 * sin(p.x * 2.1 - t * 3.1) * cos(p.y * 1.7 + t * 2.3);
@@ -182,17 +123,14 @@ const HEAT_FRAGMENT_SHADER = `
 
   void main() {
     vec2 uv = vUv;
-
     vec2 d = uv - rocketScreenPos;
     d.x *= aspect;
     float dist = length(d);
     float mask = 1.0 - smoothstep(0.0, maskRadius, dist);
-
     vec2 p = uv * frequency;
     float nx = turbulence(p, time);
     float ny = turbulence(p + 17.0, time);
     vec2 offset = vec2(nx, ny) * strength * mask;
-
     gl_FragColor = texture2D(tDiffuse, uv + offset);
   }
 `
@@ -205,6 +143,7 @@ const SKY_VERTEX_SHADER = `
     gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
   }
 `
+
 const SKY_FRAGMENT_SHADER = `
   uniform vec3 topColor;
   uniform vec3 midColor;
@@ -212,6 +151,7 @@ const SKY_FRAGMENT_SHADER = `
   uniform float offset;
   uniform float exponent;
   varying vec3 vWorldPosition;
+
   void main() {
     float h = normalize(vWorldPosition).y;
     float t = clamp(pow(max(h + offset, 0.0), exponent), 0.0, 1.0);
@@ -239,6 +179,9 @@ export function Scene({ telemetryRef, launched }: SceneProps) {
   const trenchCloudVel = useRef<Float32Array | null>(null)
   const trenchCloudAge = useRef<Float32Array | null>(null)
   const heatStrengthRef = useRef<{ value: number } | null>(null)
+  const cumulusLayerRef = useRef<CloudLayer | null>(null)
+  const stratusLayerRef = useRef<CloudLayer | null>(null)
+  const cirrusLayerRef = useRef<CloudLayer | null>(null)
   const rafRef = useRef<number>(0)
   const clockRef = useRef(new THREE.Clock())
 
@@ -250,15 +193,14 @@ export function Scene({ telemetryRef, launched }: SceneProps) {
     const width = mount.clientWidth || 640
     const height = mount.clientHeight || 480
 
-    // ---- Core scene setup ----
     const scene = new THREE.Scene()
 
     const skyUniforms = {
-      topColor: { value: new THREE.Color(0x00000f) },
-      midColor: { value: new THREE.Color(0x241a3d) },
+      topColor:    { value: new THREE.Color(0x00000f) },
+      midColor:    { value: new THREE.Color(0x241a3d) },
       bottomColor: { value: new THREE.Color(0xe0875f) },
-      offset: { value: 0.05 },
-      exponent: { value: 0.5 }
+      offset:      { value: 0.05 },
+      exponent:    { value: 0.5 }
     }
     const sky = new THREE.Mesh(
       new THREE.SphereGeometry(500, 48, 32),
@@ -304,29 +246,31 @@ export function Scene({ telemetryRef, launched }: SceneProps) {
     fill.position.set(-6, 4, -4)
     scene.add(fill)
 
-    // Dynamic ignition light — orange point light at pad level,
-    // flickers at liftoff and fades as rocket climbs. Bloom alone
-    // doesn't light surrounding geometry; this does.
     const ignitionLight = new THREE.PointLight(0xff6600, 0, 8)
     ignitionLight.position.set(0, 0.5, 0)
     scene.add(ignitionLight)
 
+    // ---- Cloud layers ----
+    // Altitude bands converted to scene units (metres × ALTITUDE_SCALE=0.05)
+    // Cumulus:  600–2000m  → 30–100 scene units
+    // Stratus:  0–600m     → 0–30 scene units
+    // Cirrus:   6000–12000m → 300–600 scene units
+    cumulusLayerRef.current = new CloudLayer(scene, 'cumulus', 30, 100, 0.65)
+    stratusLayerRef.current = new CloudLayer(scene, 'stratus', 0, 30, 0.4)
+    cirrusLayerRef.current  = new CloudLayer(scene, 'cirrus', 300, 600, 0.5)
+
     // ---- Launch pad ----
     const padCanvas = document.createElement('canvas')
-    padCanvas.width = 256
-    padCanvas.height = 256
+    padCanvas.width = 256; padCanvas.height = 256
     const padCtx = padCanvas.getContext('2d')!
-    padCtx.fillStyle = '#2f2f33'
-    padCtx.fillRect(0, 0, 256, 256)
+    padCtx.fillStyle = '#2f2f33'; padCtx.fillRect(0, 0, 256, 256)
     for (let i = 0; i < 1200; i++) {
-      const x = Math.random() * 256
-      const y = Math.random() * 256
+      const x = Math.random() * 256; const y = Math.random() * 256
       const shade = 35 + Math.random() * 30
       padCtx.fillStyle = `rgba(${shade}, ${shade}, ${shade + 4}, ${0.1 + Math.random() * 0.2})`
       padCtx.fillRect(x, y, 1, 1)
     }
-    padCtx.strokeStyle = 'rgba(10,10,12,0.85)'
-    padCtx.lineWidth = 3
+    padCtx.strokeStyle = 'rgba(10,10,12,0.85)'; padCtx.lineWidth = 3
     const padCell = 256 / 4
     for (let i = 0; i <= 4; i++) {
       padCtx.beginPath(); padCtx.moveTo(i * padCell, 0); padCtx.lineTo(i * padCell, 256); padCtx.stroke()
@@ -339,21 +283,16 @@ export function Scene({ telemetryRef, launched }: SceneProps) {
       }
     }
     const padTexture = new THREE.CanvasTexture(padCanvas)
-    padTexture.wrapS = THREE.RepeatWrapping
-    padTexture.wrapT = THREE.RepeatWrapping
-    padTexture.repeat.set(3, 3)
+    padTexture.wrapS = THREE.RepeatWrapping; padTexture.wrapT = THREE.RepeatWrapping; padTexture.repeat.set(3, 3)
     const padGeo = new THREE.CylinderGeometry(2, 2.2, 0.5, 24)
     const padMat = new THREE.MeshStandardMaterial({ color: 0xffffff, map: padTexture, roughness: 0.8, metalness: 0.3 })
     const pad = new THREE.Mesh(padGeo, padMat)
-    pad.position.y = -0.25
-    pad.receiveShadow = true
-    scene.add(pad)
+    pad.position.y = -0.25; pad.receiveShadow = true; scene.add(pad)
 
     const towerGeo = new THREE.BoxGeometry(0.15, 6, 0.15)
     const towerMat = new THREE.MeshStandardMaterial({ color: 0x555555 })
     const tower = new THREE.Mesh(towerGeo, towerMat)
-    tower.position.set(2.6, 2.75, 0)
-    scene.add(tower)
+    tower.position.set(2.6, 2.75, 0); scene.add(tower)
 
     const groundCanvas = document.createElement('canvas')
     groundCanvas.width = 512; groundCanvas.height = 512
@@ -376,8 +315,7 @@ export function Scene({ telemetryRef, launched }: SceneProps) {
     const groundGeo = new THREE.PlaneGeometry(80, 80)
     const groundMat = new THREE.MeshStandardMaterial({ color: 0xffffff, map: groundTexture })
     const ground = new THREE.Mesh(groundGeo, groundMat)
-    ground.rotation.x = -Math.PI / 2; ground.position.y = -0.5; ground.receiveShadow = true
-    scene.add(ground)
+    ground.rotation.x = -Math.PI / 2; ground.position.y = -0.5; ground.receiveShadow = true; scene.add(ground)
 
     const scorchCanvas = document.createElement('canvas')
     scorchCanvas.width = 256; scorchCanvas.height = 256
@@ -392,90 +330,53 @@ export function Scene({ telemetryRef, launched }: SceneProps) {
     const scorch = new THREE.Mesh(scorchGeo, scorchMat)
     scorch.rotation.x = -Math.PI / 2; scorch.position.y = -0.48; scene.add(scorch)
 
-    // ---- Flame trench geometry ----
-    // Flat cone sections on their sides, one per direction (left/right).
-    // CylinderGeometry with 0 top radius approximates the fan/wedge shape.
+    // ---- Flame trench ----
     const trenchGeo = new THREE.CylinderGeometry(0, 1, 0.2, 24, 1, false)
-    // Rotate the cone to lie on its side pointing outward
     trenchGeo.rotateZ(Math.PI / 2)
-
     const trenchLeftMat = new THREE.ShaderMaterial({
       uniforms: { progress: { value: 0.0 }, side: { value: -1.0 } },
-      vertexShader: TRENCH_VERTEX,
-      fragmentShader: TRENCH_FRAGMENT,
-      transparent: true,
-      depthWrite: false,
-      side: THREE.DoubleSide
+      vertexShader: TRENCH_VERTEX, fragmentShader: TRENCH_FRAGMENT,
+      transparent: true, depthWrite: false, side: THREE.DoubleSide
     })
     const trenchRightMat = new THREE.ShaderMaterial({
       uniforms: { progress: { value: 0.0 }, side: { value: 1.0 } },
-      vertexShader: TRENCH_VERTEX,
-      fragmentShader: TRENCH_FRAGMENT,
-      transparent: true,
-      depthWrite: false,
-      side: THREE.DoubleSide
+      vertexShader: TRENCH_VERTEX, fragmentShader: TRENCH_FRAGMENT,
+      transparent: true, depthWrite: false, side: THREE.DoubleSide
     })
-
     const trenchLeft = new THREE.Mesh(trenchGeo, trenchLeftMat)
     const trenchRight = new THREE.Mesh(trenchGeo.clone(), trenchRightMat)
+    trenchLeft.position.set(-1.2, -0.3, 0); trenchRight.position.set(1.2, -0.3, 0)
+    trenchLeft.visible = false; trenchRight.visible = false
+    scene.add(trenchLeft); scene.add(trenchRight)
+    trenchLeftRef.current = trenchLeft; trenchRightRef.current = trenchRight
+    trenchLeftMatRef.current = trenchLeftMat; trenchRightMatRef.current = trenchRightMat
 
-    // Position at pad level, at the mouth of the trench
-    trenchLeft.position.set(-1.2, -0.3, 0)
-    trenchRight.position.set(1.2, -0.3, 0)
-    trenchLeft.visible = false
-    trenchRight.visible = false
-    scene.add(trenchLeft)
-    scene.add(trenchRight)
-    trenchLeftRef.current = trenchLeft
-    trenchRightRef.current = trenchRight
-    trenchLeftMatRef.current = trenchLeftMat
-    trenchRightMatRef.current = trenchRightMat
-
-    // ---- Flame trench volumetric billboard cloud ----
-    // Layered on top of the flat shader-plane trench fans above to add
-    // billowing bulk — the fans alone read as a flat sheet. Soft circular
-    // puff texture, same canvas-texture technique as the scorch mark.
+    // ---- Trench billboard cloud ----
     const trenchCloudCanvas = document.createElement('canvas')
-    trenchCloudCanvas.width = 64
-    trenchCloudCanvas.height = 64
+    trenchCloudCanvas.width = 64; trenchCloudCanvas.height = 64
     const tcCtx = trenchCloudCanvas.getContext('2d')!
     const tcGrad = tcCtx.createRadialGradient(32, 32, 0, 32, 32, 32)
     tcGrad.addColorStop(0, 'rgba(255,255,255,0.9)')
     tcGrad.addColorStop(0.4, 'rgba(255,220,180,0.5)')
     tcGrad.addColorStop(1, 'rgba(255,180,120,0)')
-    tcCtx.fillStyle = tcGrad
-    tcCtx.fillRect(0, 0, 64, 64)
+    tcCtx.fillStyle = tcGrad; tcCtx.fillRect(0, 0, 64, 64)
     const trenchCloudTexture = new THREE.CanvasTexture(trenchCloudCanvas)
-
     const trenchCloudPositions = new Float32Array(TRENCH_CLOUD_COUNT * 3)
     const trenchCloudVelocities = new Float32Array(TRENCH_CLOUD_COUNT * 3)
     const trenchCloudAges = new Float32Array(TRENCH_CLOUD_COUNT)
-    for (let i = 0; i < TRENCH_CLOUD_COUNT; i++) {
-      trenchCloudPositions[i * 3 + 1] = -100
-      trenchCloudAges[i] = 999
-    }
-    trenchCloudVel.current = trenchCloudVelocities
-    trenchCloudAge.current = trenchCloudAges
-
+    for (let i = 0; i < TRENCH_CLOUD_COUNT; i++) { trenchCloudPositions[i * 3 + 1] = -100; trenchCloudAges[i] = 999 }
+    trenchCloudVel.current = trenchCloudVelocities; trenchCloudAge.current = trenchCloudAges
     const trenchCloudGeo = new THREE.BufferGeometry()
     trenchCloudGeo.setAttribute('position', new THREE.BufferAttribute(trenchCloudPositions, 3))
     const trenchCloudMat = new THREE.PointsMaterial({
-      map: trenchCloudTexture,
-      color: 0xffbb77,
-      size: 1.4,
-      transparent: true,
-      opacity: 0,
-      depthWrite: false,
-      sizeAttenuation: true,
-      blending: THREE.AdditiveBlending
+      map: trenchCloudTexture, color: 0xffbb77, size: 1.4,
+      transparent: true, opacity: 0, depthWrite: false,
+      sizeAttenuation: true, blending: THREE.AdditiveBlending
     })
     const trenchCloud = new THREE.Points(trenchCloudGeo, trenchCloudMat)
-    scene.add(trenchCloud)
-    trenchCloudRef.current = trenchCloud
+    scene.add(trenchCloud); trenchCloudRef.current = trenchCloud
 
-    // ============================================================
-    // ROCKET GEOMETRY (unchanged from Lakshit's version)
-    // ============================================================
+    // ---- Rocket geometry ----
     const rocket = new THREE.Group()
     const bodyMat = new THREE.MeshStandardMaterial({ color: 0xe8e8e8, roughness: 0.4, metalness: 0.6 })
     const darkBandMat = new THREE.MeshStandardMaterial({ color: 0x1a1a1a, roughness: 0.5, metalness: 0.4 })
@@ -512,32 +413,19 @@ export function Scene({ telemetryRef, launched }: SceneProps) {
     }
     rocket.position.y = 0; scene.add(rocket); rocketRef.current = rocket
 
-    // ---- Plume expansion envelope ----
-    // CylinderGeometry open-ended (openEnded:true), bottom radius 0 = pointed tip.
-    // Vertex shader displaces radially from this base shape.
-    // Segments need to be high enough for the Mach disc sine waves to resolve.
+    // ---- Plume ----
     const plumeGeo = new THREE.CylinderGeometry(0, 1, 1.5, 24, 32, true)
-    // Rotate so the open end (radius=1) sits at the nozzle and the tip points down
     plumeGeo.rotateX(Math.PI)
     const plumeMat = new THREE.ShaderMaterial({
-      uniforms: {
-        expansionFactor: { value: 0.0 },
-        time: { value: 0.0 }
-      },
-      vertexShader: PLUME_VERTEX,
-      fragmentShader: PLUME_FRAGMENT,
-      transparent: true,
-      depthWrite: false,
-      side: THREE.DoubleSide,
-      blending: THREE.AdditiveBlending // additive so overlapping plume layers brighten, not cover
+      uniforms: { expansionFactor: { value: 0.0 }, time: { value: 0.0 } },
+      vertexShader: PLUME_VERTEX, fragmentShader: PLUME_FRAGMENT,
+      transparent: true, depthWrite: false, side: THREE.DoubleSide, blending: THREE.AdditiveBlending
     })
     const plume = new THREE.Mesh(plumeGeo, plumeMat)
-    plume.visible = false
-    scene.add(plume)
-    plumeRef.current = plume
-    plumeMaterialRef.current = plumeMat
+    plume.visible = false; scene.add(plume)
+    plumeRef.current = plume; plumeMaterialRef.current = plumeMat
 
-    // ---- Exhaust particles (trailing wake, unchanged) ----
+    // ---- Exhaust particles ----
     const PARTICLE_COUNT = 200
     const positions = new Float32Array(PARTICLE_COUNT * 3)
     const velocities = new Float32Array(PARTICLE_COUNT * 3)
@@ -549,7 +437,7 @@ export function Scene({ telemetryRef, launched }: SceneProps) {
     const particles = new THREE.Points(particleGeo, particleMat)
     scene.add(particles); particlesRef.current = particles
 
-    // ---- Ground ignition cloud (unchanged) ----
+    // ---- Ground ignition cloud ----
     const cloudPositions = new Float32Array(GROUND_CLOUD_COUNT * 3)
     const cloudVel = new Float32Array(GROUND_CLOUD_COUNT * 3)
     const cloudAge = new Float32Array(GROUND_CLOUD_COUNT)
@@ -567,16 +455,14 @@ export function Scene({ telemetryRef, launched }: SceneProps) {
     composer.setPixelRatio(Math.min(window.devicePixelRatio, 2))
     composer.addPass(new RenderPass(scene, camera))
 
-    // Heat scintillation — inserted before bloom so bloom applies to the
-    // already-distorted image, not before it.
     const heatUniforms = {
-      tDiffuse: { value: null as THREE.Texture | null },
-      time: { value: 0 },
-      strength: { value: 0 },
-      frequency: { value: 6.0 },
-      aspect: { value: width / height },
+      tDiffuse:       { value: null as THREE.Texture | null },
+      time:           { value: 0 },
+      strength:       { value: 0 },
+      frequency:      { value: 6.0 },
+      aspect:         { value: width / height },
       rocketScreenPos: { value: new THREE.Vector2(0.5, 0.5) },
-      maskRadius: { value: 0.35 }
+      maskRadius:     { value: 0.35 }
     }
     heatStrengthRef.current = heatUniforms.strength
     const heatPass = new ShaderPass({
@@ -590,7 +476,6 @@ export function Scene({ telemetryRef, launched }: SceneProps) {
     composer.addPass(bloomPass)
     composer.addPass(new OutputPass())
 
-    // Reused each frame to avoid allocating a Vector3 in the render loop.
     const rocketWorldPos = new THREE.Vector3()
 
     // ---- Render loop ----
@@ -605,7 +490,7 @@ export function Scene({ telemetryRef, launched }: SceneProps) {
       const tRight = trenchRightRef.current
       const tLeftMat = trenchLeftMatRef.current
       const tRightMat = trenchRightMatRef.current
-      const t = clockRef.current.getElapsedTime()
+      const elapsed = clockRef.current.getElapsedTime()
 
       if (r && telemetry) {
         r.position.y = telemetry.altitude * ALTITUDE_SCALE
@@ -619,57 +504,46 @@ export function Scene({ telemetryRef, launched }: SceneProps) {
         camera.position.set(offsetX, camY, offsetZ)
         camera.lookAt(new THREE.Vector3(r.position.x, r.position.y + 1, 0))
 
-        // ---- Plume expansion ----
+        // ---- Cloud layer update ----
+        cumulusLayerRef.current?.update(elapsed, camera.position)
+        stratusLayerRef.current?.update(elapsed, camera.position)
+        cirrusLayerRef.current?.update(elapsed, camera.position)
+
         const isThrusting = telemetry.stage === 'powered-ascent'
+
+        // ---- Plume ----
         if (plume && plumeMat) {
           plume.visible = isThrusting
           if (isThrusting) {
-            // Expansion factor: ambient pressure ratio. Sea level (0m) → 0.0,
-            // 8500m scale height → 0.63, effectively 1.0 by ~30km.
             const ambientPressureRatio = Math.exp(-telemetry.altitude / 8500)
             const expansionFactor = 1.0 - ambientPressureRatio
-
             plumeMat.uniforms.expansionFactor.value = expansionFactor
-            plumeMat.uniforms.time.value = t
-
-            // Plume sits at the nozzle base, below the rocket group
-            plume.position.set(
-              r.position.x,
-              r.position.y,     // nozzle is at y=0 within the rocket group, which is at r.position.y
-              r.position.z
-            )
-            plume.rotation.z = r.rotation.z // match rocket tilt
+            plumeMat.uniforms.time.value = elapsed
+            plume.position.set(r.position.x, r.position.y, r.position.z)
+            plume.rotation.z = r.rotation.z
           }
         }
 
-        // ---- Dynamic ignition light flicker ----
+        // ---- Ignition light ----
         if (isThrusting && telemetry.time < 5) {
-          const flicker = 0.8 + Math.random() * 0.4
-          ignitionLight.intensity = (1.0 - telemetry.time / 5) * 3.0 * flicker
+          ignitionLight.intensity = (1.0 - telemetry.time / 5) * 3.0 * (0.8 + Math.random() * 0.4)
           ignitionLight.position.y = r.position.y
         } else {
           ignitionLight.intensity = 0
         }
 
         // ---- Flame trench ----
-        // Active only while rocket is still near pad (altitude < ~8 scene units)
-        // and in powered-ascent. Progress 0→1 drives expansion and fade.
         const trenchActive = isThrusting && telemetry.altitude * ALTITUDE_SCALE < 8
         if (tLeft && tRight && tLeftMat && tRightMat) {
-          tLeft.visible = trenchActive
-          tRight.visible = trenchActive
+          tLeft.visible = trenchActive; tRight.visible = trenchActive
           if (trenchActive) {
-            // Progress tracks how far through the low-altitude window we are
             const trenchProgress = Math.min(telemetry.altitude * ALTITUDE_SCALE / 8, 1.0)
             tLeftMat.uniforms.progress.value = trenchProgress
             tRightMat.uniforms.progress.value = trenchProgress
           }
         }
 
-        // ---- Trench volumetric billboard cloud ----
-        // Recomputes the same active/progress values as the block above
-        // (cheap) rather than restructuring that block's scope, so the
-        // existing trigger logic stays untouched.
+        // ---- Trench cloud ----
         const tc = trenchCloudRef.current
         const tcVel = trenchCloudVel.current
         const tcAge = trenchCloudAge.current
@@ -690,9 +564,7 @@ export function Scene({ telemetryRef, launched }: SceneProps) {
               tcVel[idx + 2] = (Math.random() - 0.5) * 0.02
               tcAge[i] = 0
             } else if (tcAge[i] < 1.5) {
-              posAttr.array[idx] += tcVel[idx]
-              posAttr.array[idx + 1] += tcVel[idx + 1]
-              posAttr.array[idx + 2] += tcVel[idx + 2]
+              posAttr.array[idx] += tcVel[idx]; posAttr.array[idx + 1] += tcVel[idx + 1]; posAttr.array[idx + 2] += tcVel[idx + 2]
               tcAge[i] += 1 / 60
             } else if (posAttr.array[idx + 1] !== -100) {
               posAttr.array[idx + 1] = -100
@@ -700,24 +572,16 @@ export function Scene({ telemetryRef, launched }: SceneProps) {
           }
           posAttr.needsUpdate = true
           ;(tc.material as THREE.PointsMaterial).opacity = trenchActiveNow
-            ? 0.7 * (1.0 - trenchProgressNow * 0.85)
-            : 0
+            ? 0.7 * (1.0 - trenchProgressNow * 0.85) : 0
         }
 
         // ---- Heat scintillation ----
-        // Gated on powered-ascent (no shimmer when the engine isn't heating
-        // the air column) and shaped by altitude: ramps up over the first
-        // ~400m as the rocket clears the pad, holds through the max-Q
-        // stand-in band (see HEAT_PEAK_ALTITUDE), then fades using the same
-        // 8500m scale height as the air-density model.
         const alt = telemetry.altitude
         const heatRampUp = Math.min(alt / 400, 1.0)
         const heatThinAirFalloff = Math.exp(-Math.max(alt - HEAT_PEAK_ALTITUDE, 0) / HEAT_SCALE_HEIGHT)
         const heatTarget = isThrusting ? 0.008 * heatRampUp * heatThinAirFalloff : 0
-        // Ease toward target instead of snapping, so engine cutoff doesn't
-        // produce a visible pop in the distortion.
         heatUniforms.strength.value += (heatTarget - heatUniforms.strength.value) * 0.1
-        heatUniforms.time.value = t
+        heatUniforms.time.value = elapsed
 
         rocketWorldPos.set(r.position.x, r.position.y + 1, r.position.z)
         rocketWorldPos.project(camera)
@@ -732,7 +596,6 @@ export function Scene({ telemetryRef, launched }: SceneProps) {
         const posAttr = p.geometry.getAttribute('position') as THREE.BufferAttribute
         const vel = particleVelocities.current!
         const baseY = r ? r.position.y : 0
-
         for (let i = 0; i < PARTICLE_COUNT; i++) {
           const idx = i * 3
           if (isThrusting && Math.random() < 0.3) {
@@ -797,9 +660,9 @@ export function Scene({ telemetryRef, launched }: SceneProps) {
     return () => {
       cancelAnimationFrame(rafRef.current)
       if (resizeObserver) { resizeObserver.disconnect() } else { window.removeEventListener('resize', handleResize) }
-      // EffectComposer.dispose() only frees its own render targets and copy
-      // pass — it does not cascade to child passes, so the new heat pass
-      // needs its own explicit dispose (its material + fullscreen quad).
+      cumulusLayerRef.current?.dispose()
+      stratusLayerRef.current?.dispose()
+      cirrusLayerRef.current?.dispose()
       heatPass.dispose()
       composer.dispose(); renderer.dispose(); mount.removeChild(renderer.domElement)
     }
