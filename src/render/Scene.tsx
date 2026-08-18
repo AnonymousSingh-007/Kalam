@@ -284,10 +284,58 @@ export function Scene({ telemetryRef, launched }: SceneProps) {
         padCtx.beginPath(); padCtx.arc(gx * padCell + 8, gy * padCell + 8, 2.5, 0, Math.PI * 2); padCtx.fill()
       }
     }
+    // Edge-wear scuffing radiating from each bolt hole — a soft dark
+    // grime/rust halo plus a few faint lighter scrape flecks just outside it.
+    for (let gx = 0; gx < 4; gx++) {
+      for (let gy = 0; gy < 4; gy++) {
+        const bx = gx * padCell + 8; const by = gy * padCell + 8
+        const wearGrad = padCtx.createRadialGradient(bx, by, 2.5, bx, by, 9 + Math.random() * 4)
+        wearGrad.addColorStop(0, 'rgba(15,12,10,0.55)')
+        wearGrad.addColorStop(1, 'rgba(15,12,10,0)')
+        padCtx.fillStyle = wearGrad
+        padCtx.beginPath(); padCtx.arc(bx, by, 13, 0, Math.PI * 2); padCtx.fill()
+        for (let s = 0; s < 3; s++) {
+          const angle = Math.random() * Math.PI * 2
+          const dist = 6 + Math.random() * 6
+          const sx = bx + Math.cos(angle) * dist; const sy = by + Math.sin(angle) * dist
+          padCtx.fillStyle = `rgba(180,175,165,${0.15 + Math.random() * 0.15})`
+          padCtx.beginPath(); padCtx.arc(sx, sy, 1 + Math.random() * 1.5, 0, Math.PI * 2); padCtx.fill()
+        }
+      }
+    }
     const padTexture = new THREE.CanvasTexture(padCanvas)
     padTexture.wrapS = THREE.RepeatWrapping; padTexture.wrapT = THREE.RepeatWrapping; padTexture.repeat.set(3, 3)
+
+    // Roughness variation so the panel/grating doesn't read as one uniform
+    // surface — patchy grime/dust (rougher) plus slightly smoother
+    // foot-traffic/exhaust-washed seams. Only the green channel is read by
+    // MeshStandardMaterial.roughnessMap, so a grayscale fill is enough.
+    const padRoughCanvas = document.createElement('canvas')
+    padRoughCanvas.width = 256; padRoughCanvas.height = 256
+    const padRCtx = padRoughCanvas.getContext('2d')!
+    padRCtx.fillStyle = 'rgb(204,204,204)'; padRCtx.fillRect(0, 0, 256, 256)
+    for (let i = 0; i < 900; i++) {
+      const x = Math.random() * 256; const y = Math.random() * 256
+      const v = 150 + Math.random() * 90
+      padRCtx.fillStyle = `rgba(${v}, ${v}, ${v}, 0.3)`
+      padRCtx.beginPath(); padRCtx.arc(x, y, 3 + Math.random() * 8, 0, Math.PI * 2); padRCtx.fill()
+    }
+    padRCtx.strokeStyle = 'rgba(120,120,120,0.5)'; padRCtx.lineWidth = 5
+    for (let i = 0; i <= 4; i++) {
+      padRCtx.beginPath(); padRCtx.moveTo(i * padCell, 0); padRCtx.lineTo(i * padCell, 256); padRCtx.stroke()
+      padRCtx.beginPath(); padRCtx.moveTo(0, i * padCell); padRCtx.lineTo(256, i * padCell); padRCtx.stroke()
+    }
+    const padRoughTexture = new THREE.CanvasTexture(padRoughCanvas)
+    padRoughTexture.wrapS = THREE.RepeatWrapping; padRoughTexture.wrapT = THREE.RepeatWrapping; padRoughTexture.repeat.set(3, 3)
+
     const padGeo = new THREE.CylinderGeometry(2, 2.2, 0.5, 24)
-    const padMat = new THREE.MeshStandardMaterial({ color: 0xffffff, map: padTexture, roughness: 0.8, metalness: 0.3 })
+    const padMat = new THREE.MeshStandardMaterial({
+      color: 0xffffff,
+      map: padTexture,
+      roughnessMap: padRoughTexture,
+      roughness: 0.8,
+      metalness: 0.3
+    })
     const pad = new THREE.Mesh(padGeo, padMat)
     pad.position.y = -0.25; pad.receiveShadow = true; scene.add(pad)
 
@@ -300,6 +348,25 @@ export function Scene({ telemetryRef, launched }: SceneProps) {
     groundCanvas.width = 512; groundCanvas.height = 512
     const groundCtx = groundCanvas.getContext('2d')!
     groundCtx.fillStyle = '#17151a'; groundCtx.fillRect(0, 0, 512, 512)
+    // Larger irregular tonal patches for large-scale variation — drawn
+    // wrapped across the canvas edges (3x3 offset grid) so the 16x16 tiling
+    // across the 80-unit ground plane doesn't show seams at the patch level.
+    for (let i = 0; i < 10; i++) {
+      const cx = Math.random() * 512; const cy = Math.random() * 512
+      const r = 70 + Math.random() * 90
+      const shift = (Math.random() < 0.5 ? -1 : 1) * (10 + Math.random() * 14)
+      for (let ox = -512; ox <= 512; ox += 512) {
+        for (let oy = -512; oy <= 512; oy += 512) {
+          const gx = cx + ox; const gy = cy + oy
+          if (gx < -r || gx > 512 + r || gy < -r || gy > 512 + r) continue
+          const patchGrad = groundCtx.createRadialGradient(gx, gy, 0, gx, gy, r)
+          patchGrad.addColorStop(0, `rgba(${23 + shift}, ${21 + shift}, ${26 + shift}, 0.5)`)
+          patchGrad.addColorStop(1, 'rgba(23, 21, 26, 0)')
+          groundCtx.fillStyle = patchGrad
+          groundCtx.fillRect(gx - r, gy - r, r * 2, r * 2)
+        }
+      }
+    }
     for (let i = 0; i < 6000; i++) {
       const x = Math.random() * 512; const y = Math.random() * 512
       const shade = 15 + Math.random() * 35
@@ -314,8 +381,32 @@ export function Scene({ telemetryRef, launched }: SceneProps) {
     }
     const groundTexture = new THREE.CanvasTexture(groundCanvas)
     groundTexture.wrapS = THREE.RepeatWrapping; groundTexture.wrapT = THREE.RepeatWrapping; groundTexture.repeat.set(16, 16)
+
+    // Cheap fake normal map for micro-detail — mostly-flat blue-up base
+    // (128,128,255) with small random R/G perturbations, not a real
+    // heightfield-derived normal map.
+    const groundNormalCanvas = document.createElement('canvas')
+    groundNormalCanvas.width = 256; groundNormalCanvas.height = 256
+    const groundNCtx = groundNormalCanvas.getContext('2d')!
+    groundNCtx.fillStyle = 'rgb(128,128,255)'; groundNCtx.fillRect(0, 0, 256, 256)
+    for (let i = 0; i < 4000; i++) {
+      const x = Math.random() * 256; const y = Math.random() * 256
+      const nr = 128 + (Math.random() - 0.5) * 40
+      const ng = 128 + (Math.random() - 0.5) * 40
+      groundNCtx.fillStyle = `rgba(${nr}, ${ng}, 255, 0.5)`
+      groundNCtx.beginPath(); groundNCtx.arc(x, y, 1 + Math.random() * 2.5, 0, Math.PI * 2); groundNCtx.fill()
+    }
+    const groundNormalTexture = new THREE.CanvasTexture(groundNormalCanvas)
+    groundNormalTexture.wrapS = THREE.RepeatWrapping; groundNormalTexture.wrapT = THREE.RepeatWrapping
+    groundNormalTexture.repeat.set(16, 16)
+
     const groundGeo = new THREE.PlaneGeometry(80, 80)
-    const groundMat = new THREE.MeshStandardMaterial({ color: 0xffffff, map: groundTexture })
+    const groundMat = new THREE.MeshStandardMaterial({
+      color: 0xffffff,
+      map: groundTexture,
+      normalMap: groundNormalTexture,
+      normalScale: new THREE.Vector2(0.4, 0.4)
+    })
     const ground = new THREE.Mesh(groundGeo, groundMat)
     ground.rotation.x = -Math.PI / 2; ground.position.y = -0.5; ground.receiveShadow = true; scene.add(ground)
 
@@ -380,7 +471,11 @@ export function Scene({ telemetryRef, launched }: SceneProps) {
 
     // ---- Rocket geometry ----
     const rocket = new THREE.Group()
-    const bodyMat = new THREE.MeshStandardMaterial({ color: 0xe8e8e8, roughness: 0.4, metalness: 0.6 })
+    // Atlas-Centaur-style paint zones: bare-steel booster, black
+    // interstage/thermal-protection band+taper, white Centaur upper+nose.
+    // Same roughness/metalness per material as before this session — only
+    // the per-zone color changed, so the metal/plastic "feel" is unchanged.
+    const steelMat = new THREE.MeshStandardMaterial({ color: 0xc9cdd2, roughness: 0.4, metalness: 0.6 })
     const darkBandMat = new THREE.MeshStandardMaterial({ color: 0x1a1a1a, roughness: 0.5, metalness: 0.4 })
     const engineMat = new THREE.MeshStandardMaterial({ color: 0x2a2a2a, roughness: 0.6, metalness: 0.7 })
     const noseMat = new THREE.MeshStandardMaterial({ color: 0xf2f2f2, roughness: 0.3, metalness: 0.5 })
@@ -394,13 +489,13 @@ export function Scene({ telemetryRef, launched }: SceneProps) {
       const nozzle = new THREE.Mesh(nozzleGeo, engineMat); nozzle.position.set(ox, 0.05, oz); nozzle.rotation.x = Math.PI; nozzle.castShadow = true; rocket.add(nozzle)
     }
     const boosterHeight = 2.2; const boosterGeo = new THREE.CylinderGeometry(0.3, 0.32, boosterHeight, 20)
-    const booster = new THREE.Mesh(boosterGeo, bodyMat); booster.position.y = ry + boosterHeight / 2; booster.castShadow = true; rocket.add(booster); ry += boosterHeight
+    const booster = new THREE.Mesh(boosterGeo, steelMat); booster.position.y = ry + boosterHeight / 2; booster.castShadow = true; rocket.add(booster); ry += boosterHeight
     const bandHeight = 0.15; const bandGeo = new THREE.CylinderGeometry(0.3, 0.3, bandHeight, 20)
     const band = new THREE.Mesh(bandGeo, darkBandMat); band.position.y = ry + bandHeight / 2; band.castShadow = true; rocket.add(band); ry += bandHeight
     const taperHeight = 0.4; const taperGeo = new THREE.CylinderGeometry(0.2, 0.3, taperHeight, 20)
-    const taper = new THREE.Mesh(taperGeo, bodyMat); taper.position.y = ry + taperHeight / 2; taper.castShadow = true; rocket.add(taper); ry += taperHeight
+    const taper = new THREE.Mesh(taperGeo, darkBandMat); taper.position.y = ry + taperHeight / 2; taper.castShadow = true; rocket.add(taper); ry += taperHeight
     const upperHeight = 1.1; const upperGeo = new THREE.CylinderGeometry(0.2, 0.2, upperHeight, 20)
-    const upper = new THREE.Mesh(upperGeo, bodyMat); upper.position.y = ry + upperHeight / 2; upper.castShadow = true; rocket.add(upper); ry += upperHeight
+    const upper = new THREE.Mesh(upperGeo, noseMat); upper.position.y = ry + upperHeight / 2; upper.castShadow = true; rocket.add(upper); ry += upperHeight
     const noseHeight = 0.7; const noseGeo = new THREE.ConeGeometry(0.2, noseHeight, 20)
     const nose = new THREE.Mesh(noseGeo, noseMat); nose.position.y = ry + noseHeight / 2; nose.castShadow = true; rocket.add(nose); ry += noseHeight
     const finShape = new THREE.Shape()
