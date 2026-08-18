@@ -118,22 +118,31 @@ const CLOUD_FRAGMENT = `
   ${NOISE_GLSL}
 
   float cloudDensity(vec3 p, float altNorm) {
+    float d;
     if (uCloudType == 0) {
       vec3 sp = vec3(p.x * 0.15 + uTime * 0.008, p.y * 0.4, p.z * 0.15 + uTime * 0.005);
       float raw = perlinWorley(sp);
       float env = smoothstep(0.0, 0.15, altNorm) * (1.0 - smoothstep(0.4, 1.0, altNorm));
-      return max(0.0, raw * env * uCoverage);
+      d = max(0.0, raw * env * uCoverage);
     } else if (uCloudType == 1) {
       vec3 sp = vec3(p.x * 0.08 + uTime * 0.004, p.y * 0.2, p.z * 0.08 + uTime * 0.003);
       float pn = (fbmPerlin(sp, 3) + 1.0) * 0.5;
       float env = smoothstep(0.0, 0.1, altNorm) * (1.0 - smoothstep(0.85, 1.0, altNorm));
-      return max(0.0, (pn - 0.3) * 1.4 * env * uCoverage);
+      // Soft threshold instead of a hard linear cutoff (pn - 0.3, clamped at
+      // 0) — that had a discontinuous derivative right at the pn=0.3
+      // contour, which is what made stratus read as a hard-edged sheet.
+      float soft = smoothstep(0.25, 0.55, pn);
+      d = soft * env * uCoverage;
     } else {
       vec3 sp = vec3(p.x * 0.3 + uTime * 0.015, p.y * 0.6, p.z * 0.08);
       float w = fbmWorley(sp, 2);
       float env = smoothstep(0.0, 0.05, altNorm) * (1.0 - smoothstep(0.9, 1.0, altNorm));
-      return max(0.0, w * 0.6 * env * uCoverage);
+      d = max(0.0, w * 0.6 * env * uCoverage);
     }
+    // Soft dissolve near the density field's own low-density boundary —
+    // replaces an implicit hard 0/nonzero cutoff with a smooth ramp so
+    // cloud silhouettes fade at the edge instead of cutting off sharply.
+    return d * smoothstep(0.0, 0.12, d);
   }
 
   void main() {
@@ -152,14 +161,24 @@ const CLOUD_FRAGMENT = `
     tBase = max(tBase, 0.0);
     float slabThickness = uAltTop - uAltBase;
 
-    const int STEPS = 8;
-    float stepSize = (tTop - tBase) / float(STEPS);
+    const int STEPS = 16;
+    // Cap the marched distance so grazing/near-horizontal rays (very long
+    // tTop-tBase) don't produce a handful of huge steps that each cross a
+    // big chunk of optical depth in one jump. That mismatch — long steps on
+    // shallow-angle rays, tiny steps on steep ones, with a fixed step COUNT
+    // — is what made clouds read as either an opaque wall or barely-there
+    // depending on view angle, rather than a genuine coverage/density issue.
+    float rayLength = min(tTop - tBase, 140.0);
+    float stepSize = rayLength / float(STEPS);
 
     float transmittance = 1.0;
     vec3 scatteredLight = vec3(0.0);
 
-    vec3 cloudTopColor  = vec3(0.97, 0.97, 1.0);
-    vec3 cloudBaseColor = vec3(0.6, 0.62, 0.68);
+    // Warm dawn-lit tops (matches the sky dome's horizon glow ~0xe0875f),
+    // cool muted purple-gray shadowed undersides (echoes the sky's
+    // 0x241a3d mid-tone) instead of neutral white/gray.
+    vec3 cloudTopColor  = vec3(1.0, 0.82, 0.62);
+    vec3 cloudBaseColor = vec3(0.35, 0.32, 0.42);
 
     for (int i = 0; i < STEPS; i++) {
       float t = tBase + (float(i) + 0.5) * stepSize;
@@ -173,7 +192,7 @@ const CLOUD_FRAGMENT = `
       float density = cloudDensity(samplePos, altNorm);
       if (density < 0.001) continue;
 
-      float extinction = density * stepSize * 0.8;
+      float extinction = density * stepSize * 0.6;
       float sampleTransmittance = exp(-extinction);
       vec3 sampleColor = mix(cloudBaseColor, cloudTopColor, altNorm);
 

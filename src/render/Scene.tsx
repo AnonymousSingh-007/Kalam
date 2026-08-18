@@ -227,8 +227,10 @@ export function Scene({ telemetryRef, launched }: SceneProps) {
     mount.appendChild(renderer.domElement)
 
     // ---- Lighting ----
-    scene.add(new THREE.AmbientLight(0xffffff, 0.4))
-    const sun = new THREE.DirectionalLight(0xffffff, 1.2)
+    // Ambient trimmed and sun warmed for a dawn mood — matches the sky
+    // gradient/cloud palette established elsewhere rather than flat midday.
+    scene.add(new THREE.AmbientLight(0xffffff, 0.28))
+    const sun = new THREE.DirectionalLight(0xffddaa, 1.2)
     sun.position.set(6, 12, 6)
     sun.castShadow = true
     sun.shadow.mapSize.width = 2048
