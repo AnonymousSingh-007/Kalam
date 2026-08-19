@@ -6,8 +6,8 @@ import { UnrealBloomPass } from 'three/examples/jsm/postprocessing/UnrealBloomPa
 import { OutputPass } from 'three/examples/jsm/postprocessing/OutputPass.js'
 import { ShaderPass } from 'three/examples/jsm/postprocessing/ShaderPass.js'
 import { CloudLayer } from './CloudLayer'
-import type { Telemetry } from '../types'
 import { buildRocket } from './buildRocket'
+import type { Telemetry } from '../types'
 
 interface SceneProps {
   telemetryRef: React.MutableRefObject<Telemetry | null>
@@ -194,6 +194,7 @@ export function Scene({ telemetryRef, launched }: SceneProps) {
     const width = mount.clientWidth || 640
     const height = mount.clientHeight || 480
 
+    // ---- Core scene ----
     const scene = new THREE.Scene()
 
     const skyUniforms = {
@@ -203,7 +204,7 @@ export function Scene({ telemetryRef, launched }: SceneProps) {
       offset:      { value: 0.05 },
       exponent:    { value: 0.5 }
     }
-    const sky = new THREE.Mesh(
+    scene.add(new THREE.Mesh(
       new THREE.SphereGeometry(500, 48, 32),
       new THREE.ShaderMaterial({
         uniforms: skyUniforms,
@@ -212,8 +213,7 @@ export function Scene({ telemetryRef, launched }: SceneProps) {
         side: THREE.BackSide,
         depthWrite: false
       })
-    )
-    scene.add(sky)
+    ))
     scene.fog = new THREE.Fog(0xcf7c5c, 20, 80)
 
     const camera = new THREE.PerspectiveCamera(50, width / height, 0.1, 1000)
@@ -225,11 +225,11 @@ export function Scene({ telemetryRef, launched }: SceneProps) {
     renderer.setSize(width, height, true)
     renderer.shadowMap.enabled = true
     renderer.shadowMap.type = THREE.PCFSoftShadowMap
+    renderer.toneMapping = THREE.ACESFilmicToneMapping
+    renderer.toneMappingExposure = 1.1
     mount.appendChild(renderer.domElement)
 
     // ---- Lighting ----
-    // Ambient trimmed and sun warmed for a dawn mood — matches the sky
-    // gradient/cloud palette established elsewhere rather than flat midday.
     scene.add(new THREE.AmbientLight(0xffffff, 0.28))
     const sun = new THREE.DirectionalLight(0xffddaa, 1.2)
     sun.position.set(6, 12, 6)
@@ -245,6 +245,7 @@ export function Scene({ telemetryRef, launched }: SceneProps) {
     sun.shadow.bias = -0.001
     sun.shadow.camera.updateProjectionMatrix()
     scene.add(sun)
+    scene.add(new THREE.DirectionalLight(0x6a7bff, 0.3).position.set(-6, 4, -4) && sun)
     const fill = new THREE.DirectionalLight(0x6a7bff, 0.3)
     fill.position.set(-6, 4, -4)
     scene.add(fill)
@@ -254,10 +255,6 @@ export function Scene({ telemetryRef, launched }: SceneProps) {
     scene.add(ignitionLight)
 
     // ---- Cloud layers ----
-    // Altitude bands converted to scene units (metres × ALTITUDE_SCALE=0.05)
-    // Cumulus:  600–2000m  → 30–100 scene units
-    // Stratus:  0–600m     → 0–30 scene units
-    // Cirrus:   6000–12000m → 300–600 scene units
     cumulusLayerRef.current = new CloudLayer(scene, 'cumulus', 30, 100, 0.65)
     stratusLayerRef.current = new CloudLayer(scene, 'stratus', 0, 30, 0.4)
     cirrusLayerRef.current  = new CloudLayer(scene, 'cirrus', 300, 600, 0.5)
@@ -285,8 +282,6 @@ export function Scene({ telemetryRef, launched }: SceneProps) {
         padCtx.beginPath(); padCtx.arc(gx * padCell + 8, gy * padCell + 8, 2.5, 0, Math.PI * 2); padCtx.fill()
       }
     }
-    // Edge-wear scuffing radiating from each bolt hole — a soft dark
-    // grime/rust halo plus a few faint lighter scrape flecks just outside it.
     for (let gx = 0; gx < 4; gx++) {
       for (let gy = 0; gy < 4; gy++) {
         const bx = gx * padCell + 8; const by = gy * padCell + 8
@@ -307,10 +302,6 @@ export function Scene({ telemetryRef, launched }: SceneProps) {
     const padTexture = new THREE.CanvasTexture(padCanvas)
     padTexture.wrapS = THREE.RepeatWrapping; padTexture.wrapT = THREE.RepeatWrapping; padTexture.repeat.set(3, 3)
 
-    // Roughness variation so the panel/grating doesn't read as one uniform
-    // surface — patchy grime/dust (rougher) plus slightly smoother
-    // foot-traffic/exhaust-washed seams. Only the green channel is read by
-    // MeshStandardMaterial.roughnessMap, so a grayscale fill is enough.
     const padRoughCanvas = document.createElement('canvas')
     padRoughCanvas.width = 256; padRoughCanvas.height = 256
     const padRCtx = padRoughCanvas.getContext('2d')!
@@ -331,11 +322,8 @@ export function Scene({ telemetryRef, launched }: SceneProps) {
 
     const padGeo = new THREE.CylinderGeometry(2, 2.2, 0.5, 24)
     const padMat = new THREE.MeshStandardMaterial({
-      color: 0xffffff,
-      map: padTexture,
-      roughnessMap: padRoughTexture,
-      roughness: 0.8,
-      metalness: 0.3
+      color: 0xffffff, map: padTexture,
+      roughnessMap: padRoughTexture, roughness: 0.8, metalness: 0.3
     })
     const pad = new THREE.Mesh(padGeo, padMat)
     pad.position.y = -0.25; pad.receiveShadow = true; scene.add(pad)
@@ -345,13 +333,11 @@ export function Scene({ telemetryRef, launched }: SceneProps) {
     const tower = new THREE.Mesh(towerGeo, towerMat)
     tower.position.set(2.6, 2.75, 0); scene.add(tower)
 
+    // ---- Ground ----
     const groundCanvas = document.createElement('canvas')
     groundCanvas.width = 512; groundCanvas.height = 512
     const groundCtx = groundCanvas.getContext('2d')!
     groundCtx.fillStyle = '#17151a'; groundCtx.fillRect(0, 0, 512, 512)
-    // Larger irregular tonal patches for large-scale variation — drawn
-    // wrapped across the canvas edges (3x3 offset grid) so the 16x16 tiling
-    // across the 80-unit ground plane doesn't show seams at the patch level.
     for (let i = 0; i < 10; i++) {
       const cx = Math.random() * 512; const cy = Math.random() * 512
       const r = 70 + Math.random() * 90
@@ -383,9 +369,6 @@ export function Scene({ telemetryRef, launched }: SceneProps) {
     const groundTexture = new THREE.CanvasTexture(groundCanvas)
     groundTexture.wrapS = THREE.RepeatWrapping; groundTexture.wrapT = THREE.RepeatWrapping; groundTexture.repeat.set(16, 16)
 
-    // Cheap fake normal map for micro-detail — mostly-flat blue-up base
-    // (128,128,255) with small random R/G perturbations, not a real
-    // heightfield-derived normal map.
     const groundNormalCanvas = document.createElement('canvas')
     groundNormalCanvas.width = 256; groundNormalCanvas.height = 256
     const groundNCtx = groundNormalCanvas.getContext('2d')!
@@ -403,14 +386,13 @@ export function Scene({ telemetryRef, launched }: SceneProps) {
 
     const groundGeo = new THREE.PlaneGeometry(80, 80)
     const groundMat = new THREE.MeshStandardMaterial({
-      color: 0xffffff,
-      map: groundTexture,
-      normalMap: groundNormalTexture,
-      normalScale: new THREE.Vector2(0.4, 0.4)
+      color: 0xffffff, map: groundTexture,
+      normalMap: groundNormalTexture, normalScale: new THREE.Vector2(0.4, 0.4)
     })
     const ground = new THREE.Mesh(groundGeo, groundMat)
     ground.rotation.x = -Math.PI / 2; ground.position.y = -0.5; ground.receiveShadow = true; scene.add(ground)
 
+    // ---- Scorch ----
     const scorchCanvas = document.createElement('canvas')
     scorchCanvas.width = 256; scorchCanvas.height = 256
     const ctx = scorchCanvas.getContext('2d')!
@@ -419,9 +401,10 @@ export function Scene({ telemetryRef, launched }: SceneProps) {
     grad.addColorStop(0.7, 'rgba(80,60,30,0.25)'); grad.addColorStop(1, 'rgba(80,60,30,0)')
     ctx.fillStyle = grad; ctx.fillRect(0, 0, 256, 256)
     const scorchTexture = new THREE.CanvasTexture(scorchCanvas)
-    const scorchGeo = new THREE.CircleGeometry(5, 32)
-    const scorchMat = new THREE.MeshBasicMaterial({ map: scorchTexture, transparent: true, depthWrite: false })
-    const scorch = new THREE.Mesh(scorchGeo, scorchMat)
+    const scorch = new THREE.Mesh(
+      new THREE.CircleGeometry(5, 32),
+      new THREE.MeshBasicMaterial({ map: scorchTexture, transparent: true, depthWrite: false })
+    )
     scorch.rotation.x = -Math.PI / 2; scorch.position.y = -0.48; scene.add(scorch)
 
     // ---- Flame trench ----
@@ -470,46 +453,9 @@ export function Scene({ telemetryRef, launched }: SceneProps) {
     const trenchCloud = new THREE.Points(trenchCloudGeo, trenchCloudMat)
     scene.add(trenchCloud); trenchCloudRef.current = trenchCloud
 
-    // ---- Rocket geometry ----
+    // ---- Rocket (v2 — buildRocket handles all geometry and adds to scene) ----
     const rocket = buildRocket(scene)
-    // Atlas-Centaur-style paint zones: bare-steel booster, black
-    // interstage/thermal-protection band+taper, white Centaur upper+nose.
-    // Same roughness/metalness per material as before this session — only
-    // the per-zone color changed, so the metal/plastic "feel" is unchanged.
-    const steelMat = new THREE.MeshStandardMaterial({ color: 0xc9cdd2, roughness: 0.4, metalness: 0.6 })
-    const darkBandMat = new THREE.MeshStandardMaterial({ color: 0x1a1a1a, roughness: 0.5, metalness: 0.4 })
-    const engineMat = new THREE.MeshStandardMaterial({ color: 0x2a2a2a, roughness: 0.6, metalness: 0.7 })
-    const noseMat = new THREE.MeshStandardMaterial({ color: 0xf2f2f2, roughness: 0.3, metalness: 0.5 })
-
-    let ry = 0
-    const skirtHeight = 0.5
-    const skirtGeo = new THREE.CylinderGeometry(0.32, 0.42, skirtHeight, 20)
-    const skirt = new THREE.Mesh(skirtGeo, engineMat); skirt.position.y = ry + skirtHeight / 2; skirt.castShadow = true; rocket.add(skirt); ry += skirtHeight
-    const nozzleGeo = new THREE.ConeGeometry(0.09, 0.35, 12, 1, true)
-    for (const [ox, oz] of [[0,0],[0.16,0.16],[-0.16,0.16]] as [number,number][]) {
-      const nozzle = new THREE.Mesh(nozzleGeo, engineMat); nozzle.position.set(ox, 0.05, oz); nozzle.rotation.x = Math.PI; nozzle.castShadow = true; rocket.add(nozzle)
-    }
-    const boosterHeight = 2.2; const boosterGeo = new THREE.CylinderGeometry(0.3, 0.32, boosterHeight, 20)
-    const booster = new THREE.Mesh(boosterGeo, steelMat); booster.position.y = ry + boosterHeight / 2; booster.castShadow = true; rocket.add(booster); ry += boosterHeight
-    const bandHeight = 0.15; const bandGeo = new THREE.CylinderGeometry(0.3, 0.3, bandHeight, 20)
-    const band = new THREE.Mesh(bandGeo, darkBandMat); band.position.y = ry + bandHeight / 2; band.castShadow = true; rocket.add(band); ry += bandHeight
-    const taperHeight = 0.4; const taperGeo = new THREE.CylinderGeometry(0.2, 0.3, taperHeight, 20)
-    const taper = new THREE.Mesh(taperGeo, darkBandMat); taper.position.y = ry + taperHeight / 2; taper.castShadow = true; rocket.add(taper); ry += taperHeight
-    const upperHeight = 1.1; const upperGeo = new THREE.CylinderGeometry(0.2, 0.2, upperHeight, 20)
-    const upper = new THREE.Mesh(upperGeo, noseMat); upper.position.y = ry + upperHeight / 2; upper.castShadow = true; rocket.add(upper); ry += upperHeight
-    const noseHeight = 0.7; const noseGeo = new THREE.ConeGeometry(0.2, noseHeight, 20)
-    const nose = new THREE.Mesh(noseGeo, noseMat); nose.position.y = ry + noseHeight / 2; nose.castShadow = true; rocket.add(nose); ry += noseHeight
-    const finShape = new THREE.Shape()
-    finShape.moveTo(0,0); finShape.lineTo(0.45,0.15); finShape.lineTo(0.4,0.55); finShape.lineTo(0,0.6); finShape.lineTo(0,0)
-    const finExtrude = new THREE.ExtrudeGeometry(finShape, { depth: 0.04, bevelEnabled: false })
-    const finMat = new THREE.MeshStandardMaterial({ color: 0x999999, roughness: 0.5, metalness: 0.4 })
-    for (let i = 0; i < 4; i++) {
-      const fin = new THREE.Mesh(finExtrude, finMat)
-      const angle = (i / 4) * Math.PI * 2
-      fin.position.set(Math.cos(angle) * 0.28, skirtHeight * 0.3, Math.sin(angle) * 0.28)
-      fin.rotation.y = -angle; fin.rotation.x = -Math.PI / 2; fin.castShadow = true; rocket.add(fin)
-    }
-    rocket.position.y = 0; scene.add(rocket); rocketRef.current = rocket
+    rocketRef.current = rocket
 
     // ---- Plume ----
     const plumeGeo = new THREE.CylinderGeometry(0, 1, 1.5, 24, 32, true)
@@ -517,7 +463,8 @@ export function Scene({ telemetryRef, launched }: SceneProps) {
     const plumeMat = new THREE.ShaderMaterial({
       uniforms: { expansionFactor: { value: 0.0 }, time: { value: 0.0 } },
       vertexShader: PLUME_VERTEX, fragmentShader: PLUME_FRAGMENT,
-      transparent: true, depthWrite: false, side: THREE.DoubleSide, blending: THREE.AdditiveBlending
+      transparent: true, depthWrite: false, side: THREE.DoubleSide,
+      blending: THREE.AdditiveBlending
     })
     const plume = new THREE.Mesh(plumeGeo, plumeMat)
     plume.visible = false; scene.add(plume)
@@ -527,7 +474,10 @@ export function Scene({ telemetryRef, launched }: SceneProps) {
     const PARTICLE_COUNT = 200
     const positions = new Float32Array(PARTICLE_COUNT * 3)
     const velocities = new Float32Array(PARTICLE_COUNT * 3)
-    for (let i = 0; i < PARTICLE_COUNT; i++) { positions[i * 3] = 0; positions[i * 3 + 1] = 0; positions[i * 3 + 2] = 0; velocities[i * 3] = 0; velocities[i * 3 + 1] = 0; velocities[i * 3 + 2] = 0 }
+    for (let i = 0; i < PARTICLE_COUNT; i++) {
+      positions[i * 3] = 0; positions[i * 3 + 1] = 0; positions[i * 3 + 2] = 0
+      velocities[i * 3] = 0; velocities[i * 3 + 1] = 0; velocities[i * 3 + 2] = 0
+    }
     particleVelocities.current = velocities
     const particleGeo = new THREE.BufferGeometry()
     particleGeo.setAttribute('position', new THREE.BufferAttribute(positions, 3))
@@ -554,13 +504,13 @@ export function Scene({ telemetryRef, launched }: SceneProps) {
     composer.addPass(new RenderPass(scene, camera))
 
     const heatUniforms = {
-      tDiffuse:       { value: null as THREE.Texture | null },
-      time:           { value: 0 },
-      strength:       { value: 0 },
-      frequency:      { value: 6.0 },
-      aspect:         { value: width / height },
+      tDiffuse:        { value: null as THREE.Texture | null },
+      time:            { value: 0 },
+      strength:        { value: 0 },
+      frequency:       { value: 6.0 },
+      aspect:          { value: width / height },
       rocketScreenPos: { value: new THREE.Vector2(0.5, 0.5) },
-      maskRadius:     { value: 0.35 }
+      maskRadius:      { value: 0.35 }
     }
     heatStrengthRef.current = heatUniforms.strength
     const heatPass = new ShaderPass({
@@ -569,9 +519,7 @@ export function Scene({ telemetryRef, launched }: SceneProps) {
       fragmentShader: HEAT_FRAGMENT_SHADER
     })
     composer.addPass(heatPass)
-
-    const bloomPass = new UnrealBloomPass(new THREE.Vector2(width, height), 1.1, 0.4, 0.8)
-    composer.addPass(bloomPass)
+    composer.addPass(new UnrealBloomPass(new THREE.Vector2(width, height), 1.1, 0.4, 0.8))
     composer.addPass(new OutputPass())
 
     const rocketWorldPos = new THREE.Vector3()
@@ -602,19 +550,16 @@ export function Scene({ telemetryRef, launched }: SceneProps) {
         camera.position.set(offsetX, camY, offsetZ)
         camera.lookAt(new THREE.Vector3(r.position.x, r.position.y + 1, 0))
 
-        // ---- Cloud layer update ----
         cumulusLayerRef.current?.update(elapsed, camera.position)
         stratusLayerRef.current?.update(elapsed, camera.position)
         cirrusLayerRef.current?.update(elapsed, camera.position)
 
         const isThrusting = telemetry.stage === 'powered-ascent'
 
-        // ---- Plume ----
         if (plume && plumeMat) {
           plume.visible = isThrusting
           if (isThrusting) {
-            const ambientPressureRatio = Math.exp(-telemetry.altitude / 8500)
-            const expansionFactor = 1.0 - ambientPressureRatio
+            const expansionFactor = 1.0 - Math.exp(-telemetry.altitude / 8500)
             plumeMat.uniforms.expansionFactor.value = expansionFactor
             plumeMat.uniforms.time.value = elapsed
             plume.position.set(r.position.x, r.position.y, r.position.z)
@@ -622,7 +567,6 @@ export function Scene({ telemetryRef, launched }: SceneProps) {
           }
         }
 
-        // ---- Ignition light ----
         if (isThrusting && telemetry.time < 5) {
           ignitionLight.intensity = (1.0 - telemetry.time / 5) * 3.0 * (0.8 + Math.random() * 0.4)
           ignitionLight.position.y = r.position.y
@@ -630,7 +574,6 @@ export function Scene({ telemetryRef, launched }: SceneProps) {
           ignitionLight.intensity = 0
         }
 
-        // ---- Flame trench ----
         const trenchActive = isThrusting && telemetry.altitude * ALTITUDE_SCALE < 8
         if (tLeft && tRight && tLeftMat && tRightMat) {
           tLeft.visible = trenchActive; tRight.visible = trenchActive
@@ -641,7 +584,6 @@ export function Scene({ telemetryRef, launched }: SceneProps) {
           }
         }
 
-        // ---- Trench cloud ----
         const tc = trenchCloudRef.current
         const tcVel = trenchCloudVel.current
         const tcAge = trenchCloudAge.current
@@ -662,7 +604,9 @@ export function Scene({ telemetryRef, launched }: SceneProps) {
               tcVel[idx + 2] = (Math.random() - 0.5) * 0.02
               tcAge[i] = 0
             } else if (tcAge[i] < 1.5) {
-              posAttr.array[idx] += tcVel[idx]; posAttr.array[idx + 1] += tcVel[idx + 1]; posAttr.array[idx + 2] += tcVel[idx + 2]
+              posAttr.array[idx] += tcVel[idx]
+              posAttr.array[idx + 1] += tcVel[idx + 1]
+              posAttr.array[idx + 2] += tcVel[idx + 2]
               tcAge[i] += 1 / 60
             } else if (posAttr.array[idx + 1] !== -100) {
               posAttr.array[idx + 1] = -100
@@ -673,7 +617,6 @@ export function Scene({ telemetryRef, launched }: SceneProps) {
             ? 0.7 * (1.0 - trenchProgressNow * 0.85) : 0
         }
 
-        // ---- Heat scintillation ----
         const alt = telemetry.altitude
         const heatRampUp = Math.min(alt / 400, 1.0)
         const heatThinAirFalloff = Math.exp(-Math.max(alt - HEAT_PEAK_ALTITUDE, 0) / HEAT_SCALE_HEIGHT)
@@ -704,7 +647,9 @@ export function Scene({ telemetryRef, launched }: SceneProps) {
             vel[idx + 1] = -Math.random() * 0.1 - 0.05
             vel[idx + 2] = (Math.random() - 0.5) * 0.05
           } else {
-            posAttr.array[idx] += vel[idx]; posAttr.array[idx + 1] += vel[idx + 1]; posAttr.array[idx + 2] += vel[idx + 2]
+            posAttr.array[idx] += vel[idx]
+            posAttr.array[idx + 1] += vel[idx + 1]
+            posAttr.array[idx + 2] += vel[idx + 2]
           }
         }
         posAttr.needsUpdate = true
@@ -721,12 +666,18 @@ export function Scene({ telemetryRef, launched }: SceneProps) {
           if (spawning && Math.random() < 0.15) {
             const angle = Math.random() * Math.PI * 2
             const radius = Math.random() * 1.2
-            posAttr.array[idx] = Math.cos(angle) * radius; posAttr.array[idx + 1] = -0.3; posAttr.array[idx + 2] = Math.sin(angle) * radius
+            posAttr.array[idx] = Math.cos(angle) * radius
+            posAttr.array[idx + 1] = -0.3
+            posAttr.array[idx + 2] = Math.sin(angle) * radius
             const outSpeed = 0.03 + Math.random() * 0.05
-            vel[idx] = Math.cos(angle) * outSpeed; vel[idx + 1] = 0.01 + Math.random() * 0.015; vel[idx + 2] = Math.sin(angle) * outSpeed
+            vel[idx] = Math.cos(angle) * outSpeed
+            vel[idx + 1] = 0.01 + Math.random() * 0.015
+            vel[idx + 2] = Math.sin(angle) * outSpeed
             age[i] = 0
           } else if (age[i] < 4) {
-            posAttr.array[idx] += vel[idx]; posAttr.array[idx + 1] += vel[idx + 1]; posAttr.array[idx + 2] += vel[idx + 2]
+            posAttr.array[idx] += vel[idx]
+            posAttr.array[idx + 1] += vel[idx + 1]
+            posAttr.array[idx + 2] += vel[idx + 2]
             vel[idx] *= 0.98; vel[idx + 2] *= 0.98; age[i] += dt
           } else if (posAttr.array[idx + 1] !== -100) {
             posAttr.array[idx + 1] = -100
