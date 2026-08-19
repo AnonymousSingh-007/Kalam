@@ -7,6 +7,7 @@ import { OutputPass } from 'three/examples/jsm/postprocessing/OutputPass.js'
 import { ShaderPass } from 'three/examples/jsm/postprocessing/ShaderPass.js'
 import { CloudLayer } from './CloudLayer'
 import type { Telemetry } from '../types'
+import { buildRocket } from './buildRocket'
 
 interface SceneProps {
   telemetryRef: React.MutableRefObject<Telemetry | null>
@@ -470,7 +471,7 @@ export function Scene({ telemetryRef, launched }: SceneProps) {
     scene.add(trenchCloud); trenchCloudRef.current = trenchCloud
 
     // ---- Rocket geometry ----
-    const rocket = new THREE.Group()
+    const rocket = buildRocket(scene)
     // Atlas-Centaur-style paint zones: bare-steel booster, black
     // interstage/thermal-protection band+taper, white Centaur upper+nose.
     // Same roughness/metalness per material as before this session — only
