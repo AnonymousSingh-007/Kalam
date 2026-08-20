@@ -7,6 +7,7 @@ import { OutputPass } from 'three/examples/jsm/postprocessing/OutputPass.js'
 import { ShaderPass } from 'three/examples/jsm/postprocessing/ShaderPass.js'
 import { CloudLayer } from './CloudLayer'
 import { buildRocket } from './buildRocket'
+import { buildGround, type GroundResult } from './buildGround'
 import type { Telemetry } from '../types'
 
 interface SceneProps {
@@ -183,6 +184,7 @@ export function Scene({ telemetryRef, launched }: SceneProps) {
   const cumulusLayerRef = useRef<CloudLayer | null>(null)
   const stratusLayerRef = useRef<CloudLayer | null>(null)
   const cirrusLayerRef = useRef<CloudLayer | null>(null)
+  const groundResultRef = useRef<GroundResult | null>(null)
   const rafRef = useRef<number>(0)
   const clockRef = useRef(new THREE.Clock())
 
@@ -205,7 +207,7 @@ export function Scene({ telemetryRef, launched }: SceneProps) {
       exponent:    { value: 0.5 }
     }
     scene.add(new THREE.Mesh(
-      new THREE.SphereGeometry(500, 48, 32),
+      new THREE.SphereGeometry(2000, 48, 32),
       new THREE.ShaderMaterial({
         uniforms: skyUniforms,
         vertexShader: SKY_VERTEX_SHADER,
@@ -214,9 +216,9 @@ export function Scene({ telemetryRef, launched }: SceneProps) {
         depthWrite: false
       })
     ))
-    scene.fog = new THREE.Fog(0xcf7c5c, 20, 80)
+    scene.fog = new THREE.Fog(0xcf7c5c, 40, 600)
 
-    const camera = new THREE.PerspectiveCamera(50, width / height, 0.1, 1000)
+    const camera = new THREE.PerspectiveCamera(50, width / height, 0.1, 4000)
     camera.position.set(9, 4, 13)
     camera.lookAt(0, 3, 0)
 
@@ -245,7 +247,6 @@ export function Scene({ telemetryRef, launched }: SceneProps) {
     sun.shadow.bias = -0.001
     sun.shadow.camera.updateProjectionMatrix()
     scene.add(sun)
-    scene.add(new THREE.DirectionalLight(0x6a7bff, 0.3).position.set(-6, 4, -4) && sun)
     const fill = new THREE.DirectionalLight(0x6a7bff, 0.3)
     fill.position.set(-6, 4, -4)
     scene.add(fill)
@@ -258,6 +259,11 @@ export function Scene({ telemetryRef, launched }: SceneProps) {
     cumulusLayerRef.current = new CloudLayer(scene, 'cumulus', 30, 100, 0.65)
     stratusLayerRef.current = new CloudLayer(scene, 'stratus', 0, 30, 0.4)
     cirrusLayerRef.current  = new CloudLayer(scene, 'cirrus', 300, 600, 0.5)
+
+    // ---- Ground + atmosphere (sphere cap with curvature) ----
+    const groundResult = buildGround()
+    groundResultRef.current = groundResult
+    scene.add(groundResult.group)
 
     // ---- Launch pad ----
     const padCanvas = document.createElement('canvas')
@@ -333,80 +339,6 @@ export function Scene({ telemetryRef, launched }: SceneProps) {
     const tower = new THREE.Mesh(towerGeo, towerMat)
     tower.position.set(2.6, 2.75, 0); scene.add(tower)
 
-    // ---- Ground ----
-    const groundCanvas = document.createElement('canvas')
-    groundCanvas.width = 512; groundCanvas.height = 512
-    const groundCtx = groundCanvas.getContext('2d')!
-    groundCtx.fillStyle = '#17151a'; groundCtx.fillRect(0, 0, 512, 512)
-    for (let i = 0; i < 10; i++) {
-      const cx = Math.random() * 512; const cy = Math.random() * 512
-      const r = 70 + Math.random() * 90
-      const shift = (Math.random() < 0.5 ? -1 : 1) * (10 + Math.random() * 14)
-      for (let ox = -512; ox <= 512; ox += 512) {
-        for (let oy = -512; oy <= 512; oy += 512) {
-          const gx = cx + ox; const gy = cy + oy
-          if (gx < -r || gx > 512 + r || gy < -r || gy > 512 + r) continue
-          const patchGrad = groundCtx.createRadialGradient(gx, gy, 0, gx, gy, r)
-          patchGrad.addColorStop(0, `rgba(${23 + shift}, ${21 + shift}, ${26 + shift}, 0.5)`)
-          patchGrad.addColorStop(1, 'rgba(23, 21, 26, 0)')
-          groundCtx.fillStyle = patchGrad
-          groundCtx.fillRect(gx - r, gy - r, r * 2, r * 2)
-        }
-      }
-    }
-    for (let i = 0; i < 6000; i++) {
-      const x = Math.random() * 512; const y = Math.random() * 512
-      const shade = 15 + Math.random() * 35
-      groundCtx.fillStyle = `rgba(${shade + 10}, ${shade + 8}, ${shade + 12}, ${0.15 + Math.random() * 0.25})`
-      groundCtx.beginPath(); groundCtx.arc(x, y, 0.6 + Math.random() * 1.8, 0, Math.PI * 2); groundCtx.fill()
-    }
-    for (let i = 0; i < 220; i++) {
-      const x = Math.random() * 512; const y = Math.random() * 512
-      const shade = 40 + Math.random() * 60
-      groundCtx.fillStyle = `rgba(${shade}, ${shade - 6}, ${shade - 10}, ${0.3 + Math.random() * 0.3})`
-      groundCtx.beginPath(); groundCtx.arc(x, y, 1.5 + Math.random() * 3, 0, Math.PI * 2); groundCtx.fill()
-    }
-    const groundTexture = new THREE.CanvasTexture(groundCanvas)
-    groundTexture.wrapS = THREE.RepeatWrapping; groundTexture.wrapT = THREE.RepeatWrapping; groundTexture.repeat.set(16, 16)
-
-    const groundNormalCanvas = document.createElement('canvas')
-    groundNormalCanvas.width = 256; groundNormalCanvas.height = 256
-    const groundNCtx = groundNormalCanvas.getContext('2d')!
-    groundNCtx.fillStyle = 'rgb(128,128,255)'; groundNCtx.fillRect(0, 0, 256, 256)
-    for (let i = 0; i < 4000; i++) {
-      const x = Math.random() * 256; const y = Math.random() * 256
-      const nr = 128 + (Math.random() - 0.5) * 40
-      const ng = 128 + (Math.random() - 0.5) * 40
-      groundNCtx.fillStyle = `rgba(${nr}, ${ng}, 255, 0.5)`
-      groundNCtx.beginPath(); groundNCtx.arc(x, y, 1 + Math.random() * 2.5, 0, Math.PI * 2); groundNCtx.fill()
-    }
-    const groundNormalTexture = new THREE.CanvasTexture(groundNormalCanvas)
-    groundNormalTexture.wrapS = THREE.RepeatWrapping; groundNormalTexture.wrapT = THREE.RepeatWrapping
-    groundNormalTexture.repeat.set(16, 16)
-
-    const groundGeo = new THREE.PlaneGeometry(80, 80)
-    const groundMat = new THREE.MeshStandardMaterial({
-      color: 0xffffff, map: groundTexture,
-      normalMap: groundNormalTexture, normalScale: new THREE.Vector2(0.4, 0.4)
-    })
-    const ground = new THREE.Mesh(groundGeo, groundMat)
-    ground.rotation.x = -Math.PI / 2; ground.position.y = -0.5; ground.receiveShadow = true; scene.add(ground)
-
-    // ---- Scorch ----
-    const scorchCanvas = document.createElement('canvas')
-    scorchCanvas.width = 256; scorchCanvas.height = 256
-    const ctx = scorchCanvas.getContext('2d')!
-    const grad = ctx.createRadialGradient(128, 128, 10, 128, 128, 128)
-    grad.addColorStop(0, 'rgba(0,0,0,0.9)'); grad.addColorStop(0.35, 'rgba(60,40,20,0.6)')
-    grad.addColorStop(0.7, 'rgba(80,60,30,0.25)'); grad.addColorStop(1, 'rgba(80,60,30,0)')
-    ctx.fillStyle = grad; ctx.fillRect(0, 0, 256, 256)
-    const scorchTexture = new THREE.CanvasTexture(scorchCanvas)
-    const scorch = new THREE.Mesh(
-      new THREE.CircleGeometry(5, 32),
-      new THREE.MeshBasicMaterial({ map: scorchTexture, transparent: true, depthWrite: false })
-    )
-    scorch.rotation.x = -Math.PI / 2; scorch.position.y = -0.48; scene.add(scorch)
-
     // ---- Flame trench ----
     const trenchGeo = new THREE.CylinderGeometry(0, 1, 0.2, 24, 1, false)
     trenchGeo.rotateZ(Math.PI / 2)
@@ -453,7 +385,7 @@ export function Scene({ telemetryRef, launched }: SceneProps) {
     const trenchCloud = new THREE.Points(trenchCloudGeo, trenchCloudMat)
     scene.add(trenchCloud); trenchCloudRef.current = trenchCloud
 
-    // ---- Rocket (v2 — buildRocket handles all geometry and adds to scene) ----
+    // ---- Rocket ----
     const rocket = buildRocket(scene)
     rocketRef.current = rocket
 
@@ -553,6 +485,7 @@ export function Scene({ telemetryRef, launched }: SceneProps) {
         cumulusLayerRef.current?.update(elapsed, camera.position)
         stratusLayerRef.current?.update(elapsed, camera.position)
         cirrusLayerRef.current?.update(elapsed, camera.position)
+        groundResultRef.current?.update(telemetry.altitude)
 
         const isThrusting = telemetry.stage === 'powered-ascent'
 
@@ -712,6 +645,7 @@ export function Scene({ telemetryRef, launched }: SceneProps) {
       cumulusLayerRef.current?.dispose()
       stratusLayerRef.current?.dispose()
       cirrusLayerRef.current?.dispose()
+      groundResultRef.current?.dispose()
       heatPass.dispose()
       composer.dispose(); renderer.dispose(); mount.removeChild(renderer.domElement)
     }
