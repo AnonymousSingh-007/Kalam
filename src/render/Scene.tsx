@@ -21,6 +21,11 @@ const GROUND_CLOUD_WINDOW = 3.0
 const TRENCH_CLOUD_COUNT = 140
 const HEAT_PEAK_ALTITUDE = 1200
 const HEAT_SCALE_HEIGHT = 8500
+// Chromatic aberration ramps in only at extreme altitude — thin/edge-of-
+// atmosphere stylistic distortion, not present during normal ascent.
+const CHROMA_ALTITUDE_START = 6000 // meters
+const CHROMA_ALTITUDE_FULL = 15000 // meters
+const CHROMA_MAX_STRENGTH = 0.003 // UV units at full strength — kept subtle
 
 const PLUME_VERTEX = `
   uniform float expansionFactor;
@@ -134,6 +139,30 @@ const HEAT_FRAGMENT_SHADER = `
     float ny = turbulence(p + 17.0, time);
     vec2 offset = vec2(nx, ny) * strength * mask;
     gl_FragColor = texture2D(tDiffuse, uv + offset);
+  }
+`
+
+const CHROMA_VERTEX_SHADER = `
+  varying vec2 vUv;
+  void main() {
+    vUv = uv;
+    gl_Position = vec4(position.xy, 0.0, 1.0);
+  }
+`
+
+const CHROMA_FRAGMENT_SHADER = `
+  uniform sampler2D tDiffuse;
+  uniform float strength;
+  varying vec2 vUv;
+
+  void main() {
+    vec2 dir = vUv - 0.5;
+    vec2 offset = dir * strength;
+    float r = texture2D(tDiffuse, vUv - offset).r;
+    float g = texture2D(tDiffuse, vUv).g;
+    float b = texture2D(tDiffuse, vUv + offset).b;
+    float a = texture2D(tDiffuse, vUv).a;
+    gl_FragColor = vec4(r, g, b, a);
   }
 `
 
@@ -326,13 +355,76 @@ export function Scene({ telemetryRef, launched }: SceneProps) {
     const padRoughTexture = new THREE.CanvasTexture(padRoughCanvas)
     padRoughTexture.wrapS = THREE.RepeatWrapping; padRoughTexture.wrapT = THREE.RepeatWrapping; padRoughTexture.repeat.set(3, 3)
 
-    const padGeo = new THREE.CylinderGeometry(2, 2.2, 0.5, 24)
+    // Flat-top deck instead of the old thick tapered cylinder — thinner,
+    // straight-sided, raised on legs below (see ---- Pad structure ----).
+    // Same base-color/roughness canvas textures as before, unchanged.
+    const padGeo = new THREE.CylinderGeometry(2.2, 2.2, 0.16, 24)
     const padMat = new THREE.MeshStandardMaterial({
       color: 0xffffff, map: padTexture,
       roughnessMap: padRoughTexture, roughness: 0.8, metalness: 0.3
     })
     const pad = new THREE.Mesh(padGeo, padMat)
-    pad.position.y = -0.25; pad.receiveShadow = true; scene.add(pad)
+    pad.position.y = -0.08; pad.castShadow = true; pad.receiveShadow = true; scene.add(pad)
+
+    // ---- Pad structure: rim, support legs, flame deflector, hold-down arms ----
+    // Same PBR approach as the rocket's metal materials (buildRocket.ts) —
+    // matte structural steel, no maps, for visual consistency.
+    function addStrut(
+      from: THREE.Vector3, to: THREE.Vector3,
+      radiusAtTo: number, radiusAtFrom: number,
+      material: THREE.Material
+    ): THREE.Mesh {
+      const dir = new THREE.Vector3().subVectors(to, from)
+      const length = dir.length()
+      const geo = new THREE.CylinderGeometry(radiusAtTo, radiusAtFrom, length, 8)
+      const mesh = new THREE.Mesh(geo, material)
+      mesh.position.copy(from).addScaledVector(dir, 0.5)
+      mesh.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), dir.clone().normalize())
+      mesh.castShadow = true
+      scene.add(mesh)
+      return mesh
+    }
+
+    const structMat = new THREE.MeshStandardMaterial({ color: 0x3a3a3e, roughness: 0.55, metalness: 0.75 })
+    const deflectorMat = new THREE.MeshStandardMaterial({ color: 0x1c1c1e, roughness: 0.7, metalness: 0.6 })
+
+    // Edge rim — visible structural lip at the deck's outer edge
+    const padRimGeo = new THREE.TorusGeometry(2.2, 0.05, 8, 32)
+    const padRim = new THREE.Mesh(padRimGeo, structMat)
+    padRim.rotation.x = Math.PI / 2
+    padRim.castShadow = true
+    scene.add(padRim)
+
+    // Support legs — a ring beneath the deck, angled outward, planted at
+    // ground level (ground surface sits at y=-0.5 near the origin, per
+    // buildGround.ts's PLANET_RADIUS offset)
+    const LEG_COUNT = 6
+    for (let i = 0; i < LEG_COUNT; i++) {
+      const angle = (i / LEG_COUNT) * Math.PI * 2
+      const top = new THREE.Vector3(Math.cos(angle) * 1.75, -0.15, Math.sin(angle) * 1.75)
+      const bottom = new THREE.Vector3(Math.cos(angle) * 1.95, -0.5, Math.sin(angle) * 1.95)
+      addStrut(top, bottom, 0.05, 0.07, structMat)
+    }
+
+    // Flame deflector — low wedge in the gap beneath the deck (now open,
+    // thanks to the legs), splitting the exhaust flow toward the two
+    // existing flame-trench mouths on either side. Purely a visual
+    // suggestion, not physically simulated.
+    const deflectorGeo = new THREE.ConeGeometry(0.55, 0.3, 4, 1, true)
+    const deflector = new THREE.Mesh(deflectorGeo, deflectorMat)
+    deflector.rotation.y = Math.PI / 4
+    deflector.position.y = -0.42
+    deflector.castShadow = true
+    scene.add(deflector)
+
+    // Hold-down arms — static angled struts suggesting clamps at the
+    // rocket's base, front/back so they don't collide with the tower
+    // (+X) or the flame-trench mouths (also along the X axis)
+    for (const angle of [Math.PI / 2, -Math.PI / 2]) {
+      const outer = new THREE.Vector3(Math.cos(angle) * 2.15, 0.05, Math.sin(angle) * 2.15)
+      const inner = new THREE.Vector3(Math.cos(angle) * 0.42, 0.32, Math.sin(angle) * 0.42)
+      addStrut(inner, outer, 0.035, 0.05, structMat)
+    }
 
     const towerGeo = new THREE.BoxGeometry(0.15, 6, 0.15)
     const towerMat = new THREE.MeshStandardMaterial({ color: 0x555555 })
@@ -385,8 +477,18 @@ export function Scene({ telemetryRef, launched }: SceneProps) {
     const trenchCloud = new THREE.Points(trenchCloudGeo, trenchCloudMat)
     scene.add(trenchCloud); trenchCloudRef.current = trenchCloud
 
+    // ---- Environment map for metallic reflections ----
+    // One-time PMREM capture of the sky/ground/pad, not re-rendered per
+    // frame — a cheap approximate reflection is the goal, not a live
+    // dynamic cubemap. Captured before the rocket exists so it doesn't
+    // reflect itself.
+    const pmremGenerator = new THREE.PMREMGenerator(renderer)
+    const envRenderTarget = pmremGenerator.fromScene(scene, 0.04)
+    const envMap = envRenderTarget.texture
+    pmremGenerator.dispose()
+
     // ---- Rocket ----
-    const rocket = buildRocket(scene)
+    const rocket = buildRocket(scene, envMap)
     rocketRef.current = rocket
 
     // ---- Plume ----
@@ -452,6 +554,18 @@ export function Scene({ telemetryRef, launched }: SceneProps) {
     })
     composer.addPass(heatPass)
     composer.addPass(new UnrealBloomPass(new THREE.Vector2(width, height), 1.1, 0.4, 0.8))
+
+    const chromaUniforms = {
+      tDiffuse: { value: null as THREE.Texture | null },
+      strength: { value: 0 }
+    }
+    const chromaPass = new ShaderPass({
+      uniforms: chromaUniforms,
+      vertexShader: CHROMA_VERTEX_SHADER,
+      fragmentShader: CHROMA_FRAGMENT_SHADER
+    })
+    composer.addPass(chromaPass)
+
     composer.addPass(new OutputPass())
 
     const rocketWorldPos = new THREE.Vector3()
@@ -481,6 +595,18 @@ export function Scene({ telemetryRef, launched }: SceneProps) {
         const offsetZ = 13 + zoomFactor * 9
         camera.position.set(offsetX, camY, offsetZ)
         camera.lookAt(new THREE.Vector3(r.position.x, r.position.y + 1, 0))
+
+        // Exhaust particles are visible throughout the whole powered-ascent
+        // phase, including at high altitude once the camera-follow zoom has
+        // pulled well back — sizeAttenuation alone shrinks them enough at
+        // that distance to become hard to read. Ground-cloud and
+        // trench-billboard particles don't need this: both are gated off
+        // by ~8 scene units of altitude (zoomFactor stays <= ~0.53 for
+        // their whole active window), so their fixed sizes from earlier
+        // sessions already read fine up close without further tuning.
+        if (p) {
+          (p.material as THREE.PointsMaterial).size = 0.15 + zoomFactor * 0.25
+        }
 
         cumulusLayerRef.current?.update(elapsed, camera.position)
         stratusLayerRef.current?.update(elapsed, camera.position)
@@ -563,6 +689,17 @@ export function Scene({ telemetryRef, launched }: SceneProps) {
           (rocketWorldPos.x + 1) / 2,
           (rocketWorldPos.y + 1) / 2
         )
+
+        // ---- Chromatic aberration ----
+        // Directly recomputed from altitude each frame (no easing needed —
+        // it's already a smooth continuous function of altitude, so there's
+        // no jarring on/off transition like the heat pass has to smooth
+        // over at engine cutoff).
+        const chromaT = THREE.MathUtils.clamp(
+          (telemetry.altitude - CHROMA_ALTITUDE_START) / (CHROMA_ALTITUDE_FULL - CHROMA_ALTITUDE_START),
+          0, 1
+        )
+        chromaUniforms.strength.value = chromaT * chromaT * (3 - 2 * chromaT) * CHROMA_MAX_STRENGTH
       }
 
       if (p && telemetry) {
@@ -647,6 +784,8 @@ export function Scene({ telemetryRef, launched }: SceneProps) {
       cirrusLayerRef.current?.dispose()
       groundResultRef.current?.dispose()
       heatPass.dispose()
+      chromaPass.dispose()
+      envRenderTarget.dispose()
       composer.dispose(); renderer.dispose(); mount.removeChild(renderer.domElement)
     }
   }, [])

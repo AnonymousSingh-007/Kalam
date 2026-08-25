@@ -1,11 +1,52 @@
 import * as THREE from 'three'
 
-export function buildRocket(scene: THREE.Scene): THREE.Group {
+// Subtle grime/panel-variation base-color texture — same canvas-texture
+// technique already used for the ground/pad in Scene.tsx, just generated
+// here since it's rocket-specific. Mostly-white with faint speckle grain
+// and a few long soft streaks (exhaust wash / handling wear), multiplied
+// against each zone's own `color` so the steel/white tint is unchanged and
+// only surface variation is added.
+function makeGrimeTexture(): THREE.CanvasTexture {
+  const canvas = document.createElement('canvas')
+  canvas.width = 256
+  canvas.height = 256
+  const ctx = canvas.getContext('2d')!
+  ctx.fillStyle = '#ffffff'
+  ctx.fillRect(0, 0, 256, 256)
+  for (let i = 0; i < 3000; i++) {
+    const x = Math.random() * 256
+    const y = Math.random() * 256
+    const v = 190 + Math.random() * 50
+    ctx.fillStyle = `rgba(${v}, ${v}, ${v}, ${0.08 + Math.random() * 0.12})`
+    ctx.fillRect(x, y, 1, 1)
+  }
+  for (let i = 0; i < 30; i++) {
+    const x = Math.random() * 256
+    const len = 40 + Math.random() * 120
+    const y0 = Math.random() * (256 - len)
+    const grad = ctx.createLinearGradient(x, y0, x, y0 + len)
+    grad.addColorStop(0, 'rgba(80,75,70,0)')
+    grad.addColorStop(0.5, `rgba(80,75,70,${0.05 + Math.random() * 0.08})`)
+    grad.addColorStop(1, 'rgba(80,75,70,0)')
+    ctx.strokeStyle = grad
+    ctx.lineWidth = 1.5 + Math.random() * 2.5
+    ctx.beginPath(); ctx.moveTo(x, y0); ctx.lineTo(x, y0 + len); ctx.stroke()
+  }
+  const tex = new THREE.CanvasTexture(canvas)
+  tex.wrapS = THREE.RepeatWrapping
+  tex.wrapT = THREE.RepeatWrapping
+  tex.repeat.set(6, 10)
+  return tex
+}
+
+export function buildRocket(scene: THREE.Scene, envMap?: THREE.Texture | null): THREE.Group {
   const rocket = new THREE.Group()
+  const grimeTexture = makeGrimeTexture()
 
   // ---- Materials ----
   const steelMat = new THREE.MeshStandardMaterial({
     color: 0xb8bcc2,
+    map: grimeTexture,
     roughness: 0.28,
     metalness: 0.85,
     envMapIntensity: 0.6
@@ -25,6 +66,7 @@ export function buildRocket(scene: THREE.Scene): THREE.Group {
 
   const whiteMat = new THREE.MeshStandardMaterial({
     color: 0xf0f0f0,
+    map: grimeTexture,
     roughness: 0.35,
     metalness: 0.3,
     envMapIntensity: 0.4
@@ -68,6 +110,15 @@ export function buildRocket(scene: THREE.Scene): THREE.Group {
     emissive: new THREE.Color(0x221100),
     emissiveIntensity: 0.3
   })
+
+  // Only the polished/painted zones that already carry an envMapIntensity
+  // (steel, white Centaur, fairing) get the reflection — matte thermal
+  // protection, seams, engine bells etc. shouldn't show sky reflections.
+  if (envMap) {
+    steelMat.envMap = envMap
+    whiteMat.envMap = envMap
+    fairingMat.envMap = envMap
+  }
 
   let y = 0
 

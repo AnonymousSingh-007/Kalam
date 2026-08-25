@@ -2,6 +2,13 @@ import * as THREE from 'three'
 
 export type CloudType = 'cumulus' | 'stratus' | 'cirrus'
 
+// Radius of the enclosing sphere each layer uses as raymarch-trigger
+// geometry — see the comment in CloudLayer.init() for why a sphere replaced
+// the old flat plane. Matches the scene's fog-far distance (Scene.tsx) so
+// cloud rendering doesn't stay crisp well past where everything else has
+// already faded into fog.
+const CLOUD_DOME_RADIUS = 600
+
 const NOISE_GLSL = `
   float hash(vec3 p) {
     p = fract(p * vec3(443.8975, 397.2973, 491.1871));
@@ -158,6 +165,18 @@ const CLOUD_FRAGMENT = `
       if (tBase > tTop) { float tmp = tBase; tBase = tTop; tTop = tmp; }
     }
 
+    // The slab intersection above is unbounded — if the whole altitude band
+    // lies behind the camera (e.g. looking down at the ground from below a
+    // cumulus band), both tBase and tTop come out negative. Only tBase gets
+    // clamped to 0 below, so an unguarded tTop<0 case would march backwards
+    // (negative t = behind the camera) and could sample real noise values
+    // that coincidentally land inside the band, producing phantom cloud
+    // patches in the wrong part of the screen. This case was unreachable
+    // before (a flat plane at a single altitude never rasterized downward
+    // rays), but becomes reachable once the proxy geometry gives full
+    // screen coverage — see the geometry change in init() below.
+    if (tTop <= 0.0) discard;
+
     tBase = max(tBase, 0.0);
     float slabThickness = uAltTop - uAltBase;
 
@@ -226,8 +245,36 @@ export class CloudLayer {
   private init() {
     const typeIndex = this.type === 'cumulus' ? 0 : this.type === 'stratus' ? 1 : 2
 
-    const geo = new THREE.PlaneGeometry(400, 400, 1, 1)
-    geo.rotateX(-Math.PI / 2)
+    // The fragment shader's tBase/tTop slab intersection (see CLOUD_FRAGMENT
+    // above) is fully analytical — it intersects the ray against the
+    // uAltBase/uAltTop world-space planes directly and doesn't care what
+    // shape triggered the fragment. So the mesh here is purely a raymarch
+    // trigger, not a bound on the volume.
+    //
+    // The old geometry was a single flat 400x400 PlaneGeometry sitting at
+    // one fixed altitude. That's exactly why clouds read as flat slabs: a
+    // flat disc at a single Y only rasterizes to a reasonable footprint when
+    // viewed close to top-down. At the shallow, near-horizontal viewing
+    // angles this scene's low camera actually uses most of the time, the
+    // disc is seen near edge-on — it shrinks to almost nothing, or shows its
+    // hard rectangular boundary cutting across the sky. No finite flat plane
+    // fixes this; the screen-space footprint of a near-grazing ray against a
+    // fixed-Y plane blows up towards infinity.
+    //
+    // Fix: swap the flat disc for a large sphere centered on the origin
+    // (same technique as the sky dome above), rendered BackSide so the
+    // camera — which stays well inside it — sees the inner surface. A
+    // sphere presents a reasonable footprint from any viewing angle, and
+    // being a single convex enclosing surface, a ray crosses it exactly
+    // once — important because if a ray hit the geometry twice, the shader
+    // would run its *entire* independent slab raymarch twice and alpha-blend
+    // the results, roughly doubling apparent density/opacity. That
+    // double-hit risk is exactly why a literal "stack of several planes"
+    // fix was rejected: this shader already does a full analytical
+    // tBase-to-tTop integral per fragment, so any proxy geometry a ray can
+    // cross more than once would double-count that integral. A single
+    // enclosing sphere avoids this by construction.
+    const geo = new THREE.SphereGeometry(CLOUD_DOME_RADIUS, 32, 20)
 
     const mat = new THREE.ShaderMaterial({
       uniforms: {
@@ -242,12 +289,11 @@ export class CloudLayer {
       fragmentShader: CLOUD_FRAGMENT,
       transparent: true,
       depthWrite: false,
-      side: THREE.DoubleSide,
+      side: THREE.BackSide,
       blending: THREE.NormalBlending
     })
 
     const mesh = new THREE.Mesh(geo, mat)
-    mesh.position.y = (this.altitudeBase + this.altitudeTop) / 2
     mesh.renderOrder = 1
 
     this.scene.add(mesh)

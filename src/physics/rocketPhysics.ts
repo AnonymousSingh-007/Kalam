@@ -6,6 +6,23 @@ const AIR_DENSITY_SEA_LEVEL = 1.225
 const SCALE_HEIGHT = 8500
 const RAD_TO_DEG = 180 / Math.PI
 
+// ---- Gravity turn ----
+// Rocket rises purely vertically until it clears the pad/tower by a modest
+// margin, then the thrust vector begins pitching toward horizontal. Pitch
+// rate is proportional to current velocity (faster rocket turns faster) —
+// the standard simplified gravity-turn approximation, producing a natural
+// parabolic-ish arc without needing a scripted angle-vs-time schedule.
+const GRAVITY_TURN_START_ALTITUDE = 120 // meters
+// rad/s per m/s of velocity. Tuned against this app's default RocketParams
+// (thrust 2200N / dryMass 15kg / propellant 20kg / burnRate 1.2kg/s, ~16.7s
+// burn) to reach a visible ~60-75° pitch by burnout — since thrust/mass are
+// user-adjustable in ParamPanel, this is a judgment call to re-check live
+// against whatever params someone actually flies with.
+const PITCH_RATE_COEFFICIENT = 0.0003
+// Clamp — this is a stylized single-axis sim, not a real ascent to a
+// horizontal orbital-insertion angle, so a near-90° pitch would look wrong.
+const MAX_PITCH_ANGLE = (75 * Math.PI) / 180
+
 export class RocketPhysicsEngine {
   private params: RocketParams
   private time = 0
@@ -21,6 +38,7 @@ export class RocketPhysicsEngine {
   private lateralVelocity = 0
   private lateralAcceleration = 0
   private lateralOffset = 0
+  private pitchAngle = 0 // radians, 0 = vertical thrust vector
 
   constructor(params: RocketParams) {
     this.params = params
@@ -38,6 +56,7 @@ export class RocketPhysicsEngine {
     this.lateralVelocity = 0
     this.lateralAcceleration = 0
     this.lateralOffset = 0
+    this.pitchAngle = 0
   }
 
   private currentMass(): number {
@@ -78,13 +97,23 @@ export class RocketPhysicsEngine {
     const g = this.gravityAt(this.altitude)
     const rho = this.airDensityAt(this.altitude)
 
+    // ---- Gravity turn ----
+    // Only accumulates while burning — once thrust ends there's nothing
+    // left to steer the vehicle, so it freezes at whatever pitch it reached
+    // and coasts ballistically from there.
+    if (burning && this.altitude >= GRAVITY_TURN_START_ALTITUDE) {
+      const pitchRate = PITCH_RATE_COEFFICIENT * Math.max(this.velocity, 0)
+      this.pitchAngle = Math.min(this.pitchAngle + pitchRate * dt, MAX_PITCH_ANGLE)
+    }
+
     // ---- Vertical axis ----
     const thrustForce = burning ? this.params.thrust * this.thrustRampFactor() : 0
+    const verticalThrust = thrustForce * Math.cos(this.pitchAngle)
     const weightForce = mass * g
     const dragForce =
       0.5 * rho * this.velocity * Math.abs(this.velocity) *
       this.params.dragCoefficient * this.params.crossSectionArea
-    const netForce = thrustForce - weightForce - dragForce
+    const netForce = verticalThrust - weightForce - dragForce
     this.acceleration = netForce / mass
 
     this.velocity += this.acceleration * dt
@@ -92,10 +121,15 @@ export class RocketPhysicsEngine {
     this.time += dt
 
     // ---- Lateral axis ----
+    // Gravity-turn thrust component adds to (doesn't replace) the existing
+    // stochastic wind-drift force — wind is a small perturbation riding on
+    // top of the programmed pitch-over trajectory.
+    const horizontalThrust = thrustForce * Math.sin(this.pitchAngle)
     const lateralDragForce =
       0.5 * rho * this.lateralVelocity * Math.abs(this.lateralVelocity) *
       this.params.dragCoefficient * this.params.crossSectionArea * 0.6
-    const lateralForce = this.windDirection * this.windStrength - lateralDragForce
+    const lateralForce =
+      this.windDirection * this.windStrength + horizontalThrust - lateralDragForce
     this.lateralAcceleration = lateralForce / mass
     this.lateralVelocity += this.lateralAcceleration * dt
     this.lateralOffset += this.lateralVelocity * dt
