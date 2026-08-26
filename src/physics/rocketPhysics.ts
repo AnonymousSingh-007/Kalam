@@ -7,7 +7,7 @@ const SCALE_HEIGHT = 8500
 const RAD_TO_DEG = 180 / Math.PI
 const DEG_TO_RAD = Math.PI / 180
 
-const GIMBAL_MAX_DEG = 6.0       // maximum nozzle deflection degrees
+const GIMBAL_MAX_DEG = 25.0       // maximum nozzle deflection degrees
 const GIMBAL_RATE_DEG_S = 30.0   // degrees per second gimbal travel rate
 
 export class RocketPhysicsEngine {
