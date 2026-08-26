@@ -47,10 +47,11 @@ export interface Telemetry {
   mass: number
   stage: FlightStage
   lateralOffset: number
-  lateralVelocity: number   // m/s, horizontal drift velocity
-  angleOfAttack: number     // degrees, body axis vs velocity vector
-  axialGLoad: number        // g-force along thrust axis (what crew/payload feels)
-  lateralGLoad: number      // g-force on lateral axis from wind
+  lateralVelocity: number
+  angleOfAttack: number
+  axialGLoad: number
+  lateralGLoad: number
+  gimbalAngle: number  // degrees, positive = tilting right, negative = left
 }
 
 // Phase 3: Sarcastic commentary

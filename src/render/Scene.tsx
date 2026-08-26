@@ -6,7 +6,7 @@ import { UnrealBloomPass } from 'three/examples/jsm/postprocessing/UnrealBloomPa
 import { OutputPass } from 'three/examples/jsm/postprocessing/OutputPass.js'
 import { ShaderPass } from 'three/examples/jsm/postprocessing/ShaderPass.js'
 import { CloudLayer } from './CloudLayer'
-import { buildRocket } from './buildRocket'
+import { buildRocket, type RocketBuildResult } from './buildRocket'
 import { buildGround, type GroundResult } from './buildGround'
 import type { Telemetry } from '../types'
 
@@ -21,11 +21,9 @@ const GROUND_CLOUD_WINDOW = 3.0
 const TRENCH_CLOUD_COUNT = 140
 const HEAT_PEAK_ALTITUDE = 1200
 const HEAT_SCALE_HEIGHT = 8500
-// Chromatic aberration ramps in only at extreme altitude — thin/edge-of-
-// atmosphere stylistic distortion, not present during normal ascent.
-const CHROMA_ALTITUDE_START = 6000 // meters
-const CHROMA_ALTITUDE_FULL = 15000 // meters
-const CHROMA_MAX_STRENGTH = 0.003 // UV units at full strength — kept subtle
+const CHROMA_ALTITUDE_START = 6000
+const CHROMA_ALTITUDE_FULL = 15000
+const CHROMA_MAX_STRENGTH = 0.003
 
 const PLUME_VERTEX = `
   uniform float expansionFactor;
@@ -195,6 +193,7 @@ const SKY_FRAGMENT_SHADER = `
 export function Scene({ telemetryRef, launched }: SceneProps) {
   const mountRef = useRef<HTMLDivElement>(null)
   const rocketRef = useRef<THREE.Group | null>(null)
+  const nozzleGroupRef = useRef<THREE.Group | null>(null)
   const particlesRef = useRef<THREE.Points | null>(null)
   const particleVelocities = useRef<Float32Array | null>(null)
   const groundCloudRef = useRef<THREE.Points | null>(null)
@@ -225,7 +224,6 @@ export function Scene({ telemetryRef, launched }: SceneProps) {
     const width = mount.clientWidth || 640
     const height = mount.clientHeight || 480
 
-    // ---- Core scene ----
     const scene = new THREE.Scene()
 
     const skyUniforms = {
@@ -289,7 +287,7 @@ export function Scene({ telemetryRef, launched }: SceneProps) {
     stratusLayerRef.current = new CloudLayer(scene, 'stratus', 0, 30, 0.4)
     cirrusLayerRef.current  = new CloudLayer(scene, 'cirrus', 300, 600, 0.5)
 
-    // ---- Ground + atmosphere (sphere cap with curvature) ----
+    // ---- Ground ----
     const groundResult = buildGround()
     groundResultRef.current = groundResult
     scene.add(groundResult.group)
@@ -355,9 +353,6 @@ export function Scene({ telemetryRef, launched }: SceneProps) {
     const padRoughTexture = new THREE.CanvasTexture(padRoughCanvas)
     padRoughTexture.wrapS = THREE.RepeatWrapping; padRoughTexture.wrapT = THREE.RepeatWrapping; padRoughTexture.repeat.set(3, 3)
 
-    // Flat-top deck instead of the old thick tapered cylinder — thinner,
-    // straight-sided, raised on legs below (see ---- Pad structure ----).
-    // Same base-color/roughness canvas textures as before, unchanged.
     const padGeo = new THREE.CylinderGeometry(2.2, 2.2, 0.16, 24)
     const padMat = new THREE.MeshStandardMaterial({
       color: 0xffffff, map: padTexture,
@@ -366,9 +361,7 @@ export function Scene({ telemetryRef, launched }: SceneProps) {
     const pad = new THREE.Mesh(padGeo, padMat)
     pad.position.y = -0.08; pad.castShadow = true; pad.receiveShadow = true; scene.add(pad)
 
-    // ---- Pad structure: rim, support legs, flame deflector, hold-down arms ----
-    // Same PBR approach as the rocket's metal materials (buildRocket.ts) —
-    // matte structural steel, no maps, for visual consistency.
+    // ---- Pad structure ----
     function addStrut(
       from: THREE.Vector3, to: THREE.Vector3,
       radiusAtTo: number, radiusAtFrom: number,
@@ -388,16 +381,12 @@ export function Scene({ telemetryRef, launched }: SceneProps) {
     const structMat = new THREE.MeshStandardMaterial({ color: 0x3a3a3e, roughness: 0.55, metalness: 0.75 })
     const deflectorMat = new THREE.MeshStandardMaterial({ color: 0x1c1c1e, roughness: 0.7, metalness: 0.6 })
 
-    // Edge rim — visible structural lip at the deck's outer edge
     const padRimGeo = new THREE.TorusGeometry(2.2, 0.05, 8, 32)
     const padRim = new THREE.Mesh(padRimGeo, structMat)
     padRim.rotation.x = Math.PI / 2
     padRim.castShadow = true
     scene.add(padRim)
 
-    // Support legs — a ring beneath the deck, angled outward, planted at
-    // ground level (ground surface sits at y=-0.5 near the origin, per
-    // buildGround.ts's PLANET_RADIUS offset)
     const LEG_COUNT = 6
     for (let i = 0; i < LEG_COUNT; i++) {
       const angle = (i / LEG_COUNT) * Math.PI * 2
@@ -406,20 +395,15 @@ export function Scene({ telemetryRef, launched }: SceneProps) {
       addStrut(top, bottom, 0.05, 0.07, structMat)
     }
 
-    // Flame deflector — low wedge in the gap beneath the deck (now open,
-    // thanks to the legs), splitting the exhaust flow toward the two
-    // existing flame-trench mouths on either side. Purely a visual
-    // suggestion, not physically simulated.
-    const deflectorGeo = new THREE.ConeGeometry(0.55, 0.3, 4, 1, true)
-    const deflector = new THREE.Mesh(deflectorGeo, deflectorMat)
+    const deflector = new THREE.Mesh(
+      new THREE.ConeGeometry(0.55, 0.3, 4, 1, true),
+      deflectorMat
+    )
     deflector.rotation.y = Math.PI / 4
     deflector.position.y = -0.42
     deflector.castShadow = true
     scene.add(deflector)
 
-    // Hold-down arms — static angled struts suggesting clamps at the
-    // rocket's base, front/back so they don't collide with the tower
-    // (+X) or the flame-trench mouths (also along the X axis)
     for (const angle of [Math.PI / 2, -Math.PI / 2]) {
       const outer = new THREE.Vector3(Math.cos(angle) * 2.15, 0.05, Math.sin(angle) * 2.15)
       const inner = new THREE.Vector3(Math.cos(angle) * 0.42, 0.32, Math.sin(angle) * 0.42)
@@ -477,19 +461,16 @@ export function Scene({ telemetryRef, launched }: SceneProps) {
     const trenchCloud = new THREE.Points(trenchCloudGeo, trenchCloudMat)
     scene.add(trenchCloud); trenchCloudRef.current = trenchCloud
 
-    // ---- Environment map for metallic reflections ----
-    // One-time PMREM capture of the sky/ground/pad, not re-rendered per
-    // frame — a cheap approximate reflection is the goal, not a live
-    // dynamic cubemap. Captured before the rocket exists so it doesn't
-    // reflect itself.
+    // ---- Environment map ----
     const pmremGenerator = new THREE.PMREMGenerator(renderer)
     const envRenderTarget = pmremGenerator.fromScene(scene, 0.04)
     const envMap = envRenderTarget.texture
     pmremGenerator.dispose()
 
     // ---- Rocket ----
-    const rocket = buildRocket(scene, envMap)
+    const { rocket, nozzleGroup } = buildRocket(scene, envMap)
     rocketRef.current = rocket
+    nozzleGroupRef.current = nozzleGroup
 
     // ---- Plume ----
     const plumeGeo = new THREE.CylinderGeometry(0, 1, 1.5, 24, 32, true)
@@ -565,7 +546,6 @@ export function Scene({ telemetryRef, launched }: SceneProps) {
       fragmentShader: CHROMA_FRAGMENT_SHADER
     })
     composer.addPass(chromaPass)
-
     composer.addPass(new OutputPass())
 
     const rocketWorldPos = new THREE.Vector3()
@@ -574,6 +554,7 @@ export function Scene({ telemetryRef, launched }: SceneProps) {
     function animate() {
       const telemetry = telemetryRef.current
       const r = rocketRef.current
+      const ng = nozzleGroupRef.current
       const p = particlesRef.current
       const gc = groundCloudRef.current
       const plume = plumeRef.current
@@ -589,24 +570,26 @@ export function Scene({ telemetryRef, launched }: SceneProps) {
         r.position.x = telemetry.lateralOffset * ALTITUDE_SCALE
         r.rotation.z = THREE.MathUtils.clamp(telemetry.velocity * 0.002, -0.15, 0.15)
 
+        // ---- Nozzle gimbal rotation ----
+        if (ng) {
+          ng.rotation.z = THREE.MathUtils.lerp(
+            ng.rotation.z,
+            (telemetry.gimbalAngle * Math.PI) / 180,
+            0.15
+          )
+        }
+
+        if (p) {
+          const zoomFactor = Math.min(r.position.y / 15, 1)
+          ;(p.material as THREE.PointsMaterial).size = 0.15 + zoomFactor * 0.25
+        }
+
         const zoomFactor = Math.min(r.position.y / 15, 1)
         const camY = 4 + r.position.y
         const offsetX = r.position.x + 9 + zoomFactor * 6
         const offsetZ = 13 + zoomFactor * 9
         camera.position.set(offsetX, camY, offsetZ)
         camera.lookAt(new THREE.Vector3(r.position.x, r.position.y + 1, 0))
-
-        // Exhaust particles are visible throughout the whole powered-ascent
-        // phase, including at high altitude once the camera-follow zoom has
-        // pulled well back — sizeAttenuation alone shrinks them enough at
-        // that distance to become hard to read. Ground-cloud and
-        // trench-billboard particles don't need this: both are gated off
-        // by ~8 scene units of altitude (zoomFactor stays <= ~0.53 for
-        // their whole active window), so their fixed sizes from earlier
-        // sessions already read fine up close without further tuning.
-        if (p) {
-          (p.material as THREE.PointsMaterial).size = 0.15 + zoomFactor * 0.25
-        }
 
         cumulusLayerRef.current?.update(elapsed, camera.position)
         stratusLayerRef.current?.update(elapsed, camera.position)
@@ -690,11 +673,6 @@ export function Scene({ telemetryRef, launched }: SceneProps) {
           (rocketWorldPos.y + 1) / 2
         )
 
-        // ---- Chromatic aberration ----
-        // Directly recomputed from altitude each frame (no easing needed —
-        // it's already a smooth continuous function of altitude, so there's
-        // no jarring on/off transition like the heat pass has to smooth
-        // over at engine cutoff).
         const chromaT = THREE.MathUtils.clamp(
           (telemetry.altitude - CHROMA_ALTITUDE_START) / (CHROMA_ALTITUDE_FULL - CHROMA_ALTITUDE_START),
           0, 1
@@ -805,6 +783,7 @@ export function Scene({ telemetryRef, launched }: SceneProps) {
       if (trenchCloudAge.current) trenchCloudAge.current.fill(999)
       if (trenchCloudRef.current) (trenchCloudRef.current.material as THREE.PointsMaterial).opacity = 0
       if (heatStrengthRef.current) heatStrengthRef.current.value = 0
+      if (nozzleGroupRef.current) nozzleGroupRef.current.rotation.z = 0
     }
   }, [launched])
 
