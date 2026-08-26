@@ -5,23 +5,10 @@ const EARTH_RADIUS = 6_371_000
 const AIR_DENSITY_SEA_LEVEL = 1.225
 const SCALE_HEIGHT = 8500
 const RAD_TO_DEG = 180 / Math.PI
+const DEG_TO_RAD = Math.PI / 180
 
-// ---- Gravity turn ----
-// Rocket rises purely vertically until it clears the pad/tower by a modest
-// margin, then the thrust vector begins pitching toward horizontal. Pitch
-// rate is proportional to current velocity (faster rocket turns faster) —
-// the standard simplified gravity-turn approximation, producing a natural
-// parabolic-ish arc without needing a scripted angle-vs-time schedule.
-const GRAVITY_TURN_START_ALTITUDE = 120 // meters
-// rad/s per m/s of velocity. Tuned against this app's default RocketParams
-// (thrust 2200N / dryMass 15kg / propellant 20kg / burnRate 1.2kg/s, ~16.7s
-// burn) to reach a visible ~60-75° pitch by burnout — since thrust/mass are
-// user-adjustable in ParamPanel, this is a judgment call to re-check live
-// against whatever params someone actually flies with.
-const PITCH_RATE_COEFFICIENT = 0.0003
-// Clamp — this is a stylized single-axis sim, not a real ascent to a
-// horizontal orbital-insertion angle, so a near-90° pitch would look wrong.
-const MAX_PITCH_ANGLE = (75 * Math.PI) / 180
+const GIMBAL_MAX_DEG = 6.0       // maximum nozzle deflection degrees
+const GIMBAL_RATE_DEG_S = 30.0   // degrees per second gimbal travel rate
 
 export class RocketPhysicsEngine {
   private params: RocketParams
@@ -38,7 +25,10 @@ export class RocketPhysicsEngine {
   private lateralVelocity = 0
   private lateralAcceleration = 0
   private lateralOffset = 0
-  private pitchAngle = 0 // radians, 0 = vertical thrust vector
+
+  // Gimbal state — driven externally via setGimbalInput()
+  private gimbalAngle = 0      // current actual angle in degrees
+  private gimbalTarget = 0     // target angle driven by keyboard input
 
   constructor(params: RocketParams) {
     this.params = params
@@ -56,7 +46,14 @@ export class RocketPhysicsEngine {
     this.lateralVelocity = 0
     this.lateralAcceleration = 0
     this.lateralOffset = 0
-    this.pitchAngle = 0
+    this.gimbalAngle = 0
+    this.gimbalTarget = 0
+  }
+
+  // Called every frame from App.tsx with keyboard state
+  // input: -1 = left arrow held, +1 = right arrow held, 0 = no input
+  setGimbalInput(input: number): void {
+    this.gimbalTarget = input * GIMBAL_MAX_DEG
   }
 
   private currentMass(): number {
@@ -97,62 +94,70 @@ export class RocketPhysicsEngine {
     const g = this.gravityAt(this.altitude)
     const rho = this.airDensityAt(this.altitude)
 
-    // ---- Gravity turn ----
-    // Only accumulates while burning — once thrust ends there's nothing
-    // left to steer the vehicle, so it freezes at whatever pitch it reached
-    // and coasts ballistically from there.
-    if (burning && this.altitude >= GRAVITY_TURN_START_ALTITUDE) {
-      const pitchRate = PITCH_RATE_COEFFICIENT * Math.max(this.velocity, 0)
-      this.pitchAngle = Math.min(this.pitchAngle + pitchRate * dt, MAX_PITCH_ANGLE)
+    // ---- Gimbal angle tracking ----
+    // Only active during powered ascent — gimbal returns to zero
+    // immediately when engine cuts out
+    if (burning && this.stage === 'powered-ascent') {
+      const maxStep = GIMBAL_RATE_DEG_S * dt
+      const diff = this.gimbalTarget - this.gimbalAngle
+      if (Math.abs(diff) <= maxStep) {
+        this.gimbalAngle = this.gimbalTarget
+      } else {
+        this.gimbalAngle += Math.sign(diff) * maxStep
+      }
+      this.gimbalAngle = Math.max(-GIMBAL_MAX_DEG, Math.min(GIMBAL_MAX_DEG, this.gimbalAngle))
+    } else {
+      // No engine = no gimbal authority, snap back to zero
+      this.gimbalAngle = 0
+      this.gimbalTarget = 0
     }
 
+    const gimbalRad = this.gimbalAngle * DEG_TO_RAD
+
+    // ---- Thrust force split by gimbal angle ----
+    // Vertical component: thrust * cos(gimbalAngle)
+    // Lateral component:  thrust * sin(gimbalAngle)
+    // At 6° max: cos(6°)=0.9945 (barely loses vertical thrust),
+    // sin(6°)=0.1045 (meaningful lateral force)
+    const rawThrust = burning ? this.params.thrust * this.thrustRampFactor() : 0
+    const thrustVertical = rawThrust * Math.cos(gimbalRad)
+    const thrustLateral  = rawThrust * Math.sin(gimbalRad)
+
     // ---- Vertical axis ----
-    const thrustForce = burning ? this.params.thrust * this.thrustRampFactor() : 0
-    const verticalThrust = thrustForce * Math.cos(this.pitchAngle)
     const weightForce = mass * g
     const dragForce =
       0.5 * rho * this.velocity * Math.abs(this.velocity) *
       this.params.dragCoefficient * this.params.crossSectionArea
-    const netForce = verticalThrust - weightForce - dragForce
-    this.acceleration = netForce / mass
+    const netVertical = thrustVertical - weightForce - dragForce
+    this.acceleration = netVertical / mass
 
     this.velocity += this.acceleration * dt
     this.altitude += this.velocity * dt
     this.time += dt
 
     // ---- Lateral axis ----
-    // Gravity-turn thrust component adds to (doesn't replace) the existing
-    // stochastic wind-drift force — wind is a small perturbation riding on
-    // top of the programmed pitch-over trajectory.
-    const horizontalThrust = thrustForce * Math.sin(this.pitchAngle)
+    // Gimbal lateral force + wind force, both opposed by lateral drag
     const lateralDragForce =
       0.5 * rho * this.lateralVelocity * Math.abs(this.lateralVelocity) *
       this.params.dragCoefficient * this.params.crossSectionArea * 0.6
-    const lateralForce =
-      this.windDirection * this.windStrength + horizontalThrust - lateralDragForce
-    this.lateralAcceleration = lateralForce / mass
+
+    const windForce = this.windDirection * this.windStrength
+    const totalLateralForce = thrustLateral + windForce - lateralDragForce
+    this.lateralAcceleration = totalLateralForce / mass
     this.lateralVelocity += this.lateralAcceleration * dt
     this.lateralOffset += this.lateralVelocity * dt
 
     // ---- Derived instruments ----
-    // Angle of Attack: angle between body axis (vertical) and velocity vector.
-    // atan2(lateralVelocity, verticalVelocity) gives the flow angle in radians.
-    // At zero vertical velocity (apogee) this would spike — clamp to ±90 deg.
-    const speed = Math.sqrt(this.velocity * this.velocity + this.lateralVelocity * this.lateralVelocity)
+    const speed = Math.sqrt(
+      this.velocity * this.velocity + this.lateralVelocity * this.lateralVelocity
+    )
     const angleOfAttack = speed > 0.1
       ? Math.atan2(Math.abs(this.lateralVelocity), Math.abs(this.velocity)) * RAD_TO_DEG
       : 0
 
-    // Axial g-load: specific force along thrust axis = (thrust - drag) / mass / g0
-    // This is what an accelerometer bolted to the rocket actually reads.
-    // Gravity is NOT included — an accelerometer in free fall reads 0g.
-    // At rest on the pad it reads +1g (normal force from ground).
-    const specificForceAxial = (thrustForce - dragForce) / mass
+    const specificForceAxial = (rawThrust - dragForce) / mass
     const axialGLoad = specificForceAxial / GRAVITY_SEA_LEVEL
-
-    // Lateral g-load: specific force on lateral axis
-    const specificForceLateral = this.lateralAcceleration
-    const lateralGLoad = specificForceLateral / GRAVITY_SEA_LEVEL
+    const lateralGLoad = this.lateralAcceleration / GRAVITY_SEA_LEVEL
 
     if (!burning && !this.hasBurnedOut) {
       this.hasBurnedOut = true
@@ -209,7 +214,8 @@ export class RocketPhysicsEngine {
       lateralVelocity: this.lateralVelocity,
       angleOfAttack,
       axialGLoad,
-      lateralGLoad
+      lateralGLoad,
+      gimbalAngle: this.gimbalAngle
     }
   }
 }
