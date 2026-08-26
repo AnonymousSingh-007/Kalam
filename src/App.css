@@ -344,3 +344,7 @@ body {
   margin-top: 0.5rem;
   line-height: 1.4;
 }
+
+.gimbal-gauge svg circle:last-of-type {
+  transition: cx 0.08s linear;
+}
