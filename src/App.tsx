@@ -23,7 +23,8 @@ const EMPTY_TELEMETRY: Telemetry = {
   lateralVelocity: 0,
   angleOfAttack: 0,
   axialGLoad: 0,
-  lateralGLoad: 0
+  lateralGLoad: 0,
+  gimbalAngle: 0
 }
 
 function App() {
@@ -32,6 +33,7 @@ function App() {
   const engineRef = useRef<RocketPhysicsEngine | null>(null)
   const telemetryRef = useRef<Telemetry | null>(null)
   const commentaryEngineRef = useRef<CommentaryEngine>(new CommentaryEngine())
+  const gimbalInputRef = useRef<number>(0)
   const rafRef = useRef<number>(0)
   const lastTimeRef = useRef<number>(0)
 
@@ -47,6 +49,18 @@ function App() {
     machine.onChange(setState)
 
     let cancelled = false
+
+    function handleKeyDown(e: KeyboardEvent) {
+      if (e.key === 'ArrowLeft')  gimbalInputRef.current = -1
+      if (e.key === 'ArrowRight') gimbalInputRef.current = 1
+    }
+    function handleKeyUp(e: KeyboardEvent) {
+      if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') {
+        gimbalInputRef.current = 0
+      }
+    }
+    window.addEventListener('keydown', handleKeyDown)
+    window.addEventListener('keyup', handleKeyUp)
 
     async function setup() {
       const tracker = new HandTracker()
@@ -78,7 +92,6 @@ function App() {
         )
         machine.tick(reading)
 
-        // Countdown chatter — fires occasionally while counting down
         if (machine.getState().phase === 'counting' && Math.random() < 0.02) {
           const snap = engineRef.current?.snapshot() ?? EMPTY_TELEMETRY
           const line = commentaryEngineRef.current.fireCountdown(snap)
@@ -87,6 +100,8 @@ function App() {
       }
 
       if (engineRef.current && timestamp !== undefined) {
+        engineRef.current.setGimbalInput(gimbalInputRef.current)
+
         const dt = lastTimeRef.current
           ? (timestamp - lastTimeRef.current) / 1000
           : 1 / 60
@@ -105,7 +120,6 @@ function App() {
             )
           }
 
-          // Throttle UI telemetry updates to ~5x/sec instead of every frame
           if (Math.floor(t.time * 10) % 2 === 0) {
             setTelemetryDisplay({ ...t })
           }
@@ -121,6 +135,8 @@ function App() {
       cancelled = true
       cancelAnimationFrame(rafRef.current)
       trackerRef.current?.dispose()
+      window.removeEventListener('keydown', handleKeyDown)
+      window.removeEventListener('keyup', handleKeyUp)
     }
   }, [])
 
@@ -166,7 +182,10 @@ function App() {
 
       <main className="stage">
         <div className="viewport">
-          <InstrumentPanel telemetry={telemetryDisplay} />
+          <InstrumentPanel
+            telemetry={telemetryDisplay}
+            isThrusting={telemetryDisplay?.stage === 'powered-ascent'}
+          />
 
           <Scene telemetryRef={telemetryRef} launched={launched} />
 
