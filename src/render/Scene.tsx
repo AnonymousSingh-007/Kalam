@@ -24,6 +24,13 @@ const HEAT_SCALE_HEIGHT = 8500
 const CHROMA_ALTITUDE_START = 6000
 const CHROMA_ALTITUDE_FULL = 15000
 const CHROMA_MAX_STRENGTH = 0.003
+const STAR_FADE_START = 5000
+const STAR_FADE_FULL = 15000
+const STAR_MAX_OPACITY = 0.9
+const CAMERA_LOOK_LERP = 0.07
+const CAMERA_FOV_MAX = 50
+const CAMERA_FOV_MIN = 22
+const CAMERA_FOV_TIGHTEN_FULL_ALT = 6000
 
 const PLUME_VERTEX = `
   uniform float expansionFactor;
@@ -213,6 +220,8 @@ export function Scene({ telemetryRef, launched }: SceneProps) {
   const stratusLayerRef = useRef<CloudLayer | null>(null)
   const cirrusLayerRef = useRef<CloudLayer | null>(null)
   const groundResultRef = useRef<GroundResult | null>(null)
+  const starMatRef = useRef<THREE.PointsMaterial | null>(null)
+  const chuteRef = useRef<THREE.Mesh | null>(null)
   const rafRef = useRef<number>(0)
   const clockRef = useRef(new THREE.Clock())
 
@@ -244,6 +253,44 @@ export function Scene({ telemetryRef, launched }: SceneProps) {
       })
     ))
     scene.fog = new THREE.Fog(0xcf7c5c, 40, 600)
+
+    // ---- Starfield ----
+    // Sits just inside the sky dome (radius 2000, above) so it renders as
+    // part of the background without z-fighting against it. depthWrite is
+    // off (matching the sky dome's own convention) — stars are always the
+    // farthest depth-testing geometry in the scene by a wide margin, so
+    // regular depth testing already lets any foreground object occlude them
+    // correctly without stars needing to write into the depth buffer.
+    // sizeAttenuation is off too: real stars don't get visually bigger as
+    // the camera moves through scene-scale distances, they should read as
+    // fixed-size pinpoints regardless of camera position.
+    const STAR_COUNT = 2000
+    const STAR_RADIUS = 1900
+    const starPositions = new Float32Array(STAR_COUNT * 3)
+    for (let i = 0; i < STAR_COUNT; i++) {
+      // Uniform point on a sphere: theta uniform in [0, 2π), phi via
+      // acos(2v-1) so points don't bunch up at the poles.
+      const theta = Math.random() * Math.PI * 2
+      const phi = Math.acos(2 * Math.random() - 1)
+      const sx = Math.sin(phi) * Math.cos(theta)
+      const sy = Math.cos(phi)
+      const sz = Math.sin(phi) * Math.sin(theta)
+      starPositions[i * 3] = sx * STAR_RADIUS
+      starPositions[i * 3 + 1] = sy * STAR_RADIUS
+      starPositions[i * 3 + 2] = sz * STAR_RADIUS
+    }
+    const starGeo = new THREE.BufferGeometry()
+    starGeo.setAttribute('position', new THREE.BufferAttribute(starPositions, 3))
+    const starMat = new THREE.PointsMaterial({
+      color: 0xfff4e0,
+      size: 2.2,
+      sizeAttenuation: false,
+      transparent: true,
+      opacity: 0,
+      depthWrite: false
+    })
+    scene.add(new THREE.Points(starGeo, starMat))
+    starMatRef.current = starMat
 
     const camera = new THREE.PerspectiveCamera(50, width / height, 0.1, 4000)
     camera.position.set(9, 4, 13)
@@ -472,6 +519,21 @@ export function Scene({ telemetryRef, launched }: SceneProps) {
     rocketRef.current = rocket
     nozzleGroupRef.current = nozzleGroup
 
+    // ---- Descent/recovery chute (visual cue only, not physically
+    // simulated) ---- Positioned from the rocket's own bounding box rather
+    // than a hardcoded height, so this doesn't need to know buildRocket.ts's
+    // internal geometry stack (out of scope to read/edit in detail here).
+    // Parented to the rocket group so it automatically tracks position and
+    // tilt without needing its own per-frame position sync.
+    const rocketTopY = new THREE.Box3().setFromObject(rocket).max.y
+    const chuteMat = new THREE.MeshStandardMaterial({ color: 0xdd5522, roughness: 0.8, metalness: 0.0 })
+    const chute = new THREE.Mesh(new THREE.ConeGeometry(0.25, 0.5, 12, 1, true), chuteMat)
+    chute.rotation.x = Math.PI // flip so the wide canopy is up, apex trails down toward the nose
+    chute.position.y = rocketTopY + 0.3
+    chute.visible = false
+    rocket.add(chute)
+    chuteRef.current = chute
+
     // ---- Plume ----
     const plumeGeo = new THREE.CylinderGeometry(0, 1, 1.5, 24, 32, true)
     plumeGeo.rotateX(Math.PI)
@@ -550,6 +612,17 @@ export function Scene({ telemetryRef, launched }: SceneProps) {
 
     const rocketWorldPos = new THREE.Vector3()
 
+    // ---- Ground-anchored tracking camera ----
+    // camera.position is fixed (set once at setup, near the pad) and never
+    // reassigned per frame — only the lookAt target (lerped, so it pans
+    // rather than snaps) and FOV (tightens with altitude) animate.
+    // cameraLookTarget persists across frames (the lerp target); starts
+    // matching the initial camera.lookAt(0, 3, 0) above so there's no jump
+    // on the first tracked frame. cameraDesiredTarget is a scratch vector
+    // reused each frame to avoid allocating in the render loop.
+    const cameraLookTarget = new THREE.Vector3(0, 3, 0)
+    const cameraDesiredTarget = new THREE.Vector3()
+
     // ---- Render loop ----
     function animate() {
       const telemetry = telemetryRef.current
@@ -584,12 +657,23 @@ export function Scene({ telemetryRef, launched }: SceneProps) {
           ;(p.material as THREE.PointsMaterial).size = 0.15 + zoomFactor * 0.25
         }
 
-        const zoomFactor = Math.min(r.position.y / 15, 1)
-        const camY = 4 + r.position.y
-        const offsetX = r.position.x + 9 + zoomFactor * 6
-        const offsetZ = 13 + zoomFactor * 9
-        camera.position.set(offsetX, camY, offsetZ)
-        camera.lookAt(new THREE.Vector3(r.position.x, r.position.y + 1, 0))
+        // ---- Descent/recovery chute ----
+        if (chuteRef.current) {
+          chuteRef.current.visible = telemetry.stage === 'apogee' || telemetry.stage === 'descent'
+        }
+
+        // Camera position itself never moves (fixed at setup). Only the
+        // look target — lerped toward the rocket's current world position
+        // (including lateral drift from wind/gravity-turn, already baked
+        // into r.position.x/z) — and the FOV animate.
+        cameraDesiredTarget.set(r.position.x, r.position.y + 1, r.position.z)
+        cameraLookTarget.lerp(cameraDesiredTarget, CAMERA_LOOK_LERP)
+        camera.lookAt(cameraLookTarget)
+
+        const fovT = THREE.MathUtils.clamp(telemetry.altitude / CAMERA_FOV_TIGHTEN_FULL_ALT, 0, 1)
+        const fovEase = fovT * fovT * (3 - 2 * fovT)
+        camera.fov = THREE.MathUtils.lerp(CAMERA_FOV_MAX, CAMERA_FOV_MIN, fovEase)
+        camera.updateProjectionMatrix()
 
         cumulusLayerRef.current?.update(elapsed, camera.position)
         stratusLayerRef.current?.update(elapsed, camera.position)
@@ -605,7 +689,10 @@ export function Scene({ telemetryRef, launched }: SceneProps) {
             plumeMat.uniforms.expansionFactor.value = expansionFactor
             plumeMat.uniforms.time.value = elapsed
             plume.position.set(r.position.x, r.position.y, r.position.z)
-            plume.rotation.z = r.rotation.z
+            // Base rocket tilt (velocity-derived, set above) plus the
+            // nozzle's own gimbal deflection — same degrees->radians
+            // conversion already used for the nozzle mesh itself.
+            plume.rotation.z = r.rotation.z + (telemetry.gimbalAngle * Math.PI) / 180
           }
         }
 
@@ -678,6 +765,12 @@ export function Scene({ telemetryRef, launched }: SceneProps) {
           0, 1
         )
         chromaUniforms.strength.value = chromaT * chromaT * (3 - 2 * chromaT) * CHROMA_MAX_STRENGTH
+
+        const starT = THREE.MathUtils.clamp(
+          (telemetry.altitude - STAR_FADE_START) / (STAR_FADE_FULL - STAR_FADE_START),
+          0, 1
+        )
+        starMat.opacity = starT * starT * (3 - 2 * starT) * STAR_MAX_OPACITY
       }
 
       if (p && telemetry) {
@@ -784,6 +877,8 @@ export function Scene({ telemetryRef, launched }: SceneProps) {
       if (trenchCloudRef.current) (trenchCloudRef.current.material as THREE.PointsMaterial).opacity = 0
       if (heatStrengthRef.current) heatStrengthRef.current.value = 0
       if (nozzleGroupRef.current) nozzleGroupRef.current.rotation.z = 0
+      if (starMatRef.current) starMatRef.current.opacity = 0
+      if (chuteRef.current) chuteRef.current.visible = false
     }
   }, [launched])
 
