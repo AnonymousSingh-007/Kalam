@@ -13,9 +13,6 @@
 
 // ---- Utility ----
 
-function fract(x: number): number {
-  return x - Math.floor(x)
-}
 
 function lerp(a: number, b: number, t: number): number {
   return a + t * (b - a)
