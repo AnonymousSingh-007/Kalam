@@ -6,7 +6,7 @@ import { UnrealBloomPass } from 'three/examples/jsm/postprocessing/UnrealBloomPa
 import { OutputPass } from 'three/examples/jsm/postprocessing/OutputPass.js'
 import { ShaderPass } from 'three/examples/jsm/postprocessing/ShaderPass.js'
 import { CloudLayer } from './CloudLayer'
-import { buildRocket, type RocketBuildResult } from './buildRocket'
+import { buildRocket } from './buildRocket'
 import { buildGround, type GroundResult } from './buildGround'
 import type { Telemetry } from '../types'
 
