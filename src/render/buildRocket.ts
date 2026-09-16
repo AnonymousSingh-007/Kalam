@@ -5,12 +5,12 @@ export interface RocketBuildResult {
   nozzleGroup: THREE.Group  // rotates for gimbal animation
 }
 
-export function buildRocket(scene: THREE.Scene): RocketBuildResult {
-  const rocket = new THREE.Group()
+export function buildRocket(scene: THREE.Scene, envMap?: THREE.Texture): RocketBuildResult {  const rocket = new THREE.Group()
 
   // ---- Materials ----
-  const steelMat = new THREE.MeshStandardMaterial({
-    color: 0xb8bcc2, roughness: 0.28, metalness: 0.85, envMapIntensity: 0.6
+    const steelMat = new THREE.MeshStandardMaterial({
+    color: 0xb8bcc2, roughness: 0.28, metalness: 0.85, envMapIntensity: 0.6,
+    envMap: envMap ?? null
   })
   const thermalMat = new THREE.MeshStandardMaterial({
     color: 0x111111, roughness: 0.9, metalness: 0.1
@@ -18,11 +18,13 @@ export function buildRocket(scene: THREE.Scene): RocketBuildResult {
   const engineMat = new THREE.MeshStandardMaterial({
     color: 0x1a1a1e, roughness: 0.5, metalness: 0.8
   })
-  const whiteMat = new THREE.MeshStandardMaterial({
-    color: 0xf0f0f0, roughness: 0.35, metalness: 0.3, envMapIntensity: 0.4
+    const whiteMat = new THREE.MeshStandardMaterial({
+    color: 0xf0f0f0, roughness: 0.35, metalness: 0.3, envMapIntensity: 0.4,
+    envMap: envMap ?? null
   })
-  const fairingMat = new THREE.MeshStandardMaterial({
-    color: 0xeeeee8, roughness: 0.25, metalness: 0.2, envMapIntensity: 0.5
+    const fairingMat = new THREE.MeshStandardMaterial({
+    color: 0xeeeee8, roughness: 0.25, metalness: 0.2, envMapIntensity: 0.5,
+    envMap: envMap ?? null
   })
   const seamMat = new THREE.MeshStandardMaterial({
     color: 0x050505, roughness: 0.9, metalness: 0.1
