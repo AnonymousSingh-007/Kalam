@@ -27,10 +27,6 @@ const CHROMA_MAX_STRENGTH = 0.003
 const STAR_FADE_START = 5000
 const STAR_FADE_FULL = 15000
 const STAR_MAX_OPACITY = 0.9
-const CAMERA_LOOK_LERP = 0.07
-const CAMERA_FOV_MAX = 50
-const CAMERA_FOV_MIN = 22
-const CAMERA_FOV_TIGHTEN_FULL_ALT = 6000
 
 const PLUME_VERTEX = `
   uniform float expansionFactor;
@@ -255,21 +251,10 @@ export function Scene({ telemetryRef, launched }: SceneProps) {
     scene.fog = new THREE.Fog(0xcf7c5c, 40, 600)
 
     // ---- Starfield ----
-    // Sits just inside the sky dome (radius 2000, above) so it renders as
-    // part of the background without z-fighting against it. depthWrite is
-    // off (matching the sky dome's own convention) — stars are always the
-    // farthest depth-testing geometry in the scene by a wide margin, so
-    // regular depth testing already lets any foreground object occlude them
-    // correctly without stars needing to write into the depth buffer.
-    // sizeAttenuation is off too: real stars don't get visually bigger as
-    // the camera moves through scene-scale distances, they should read as
-    // fixed-size pinpoints regardless of camera position.
     const STAR_COUNT = 2000
     const STAR_RADIUS = 1900
     const starPositions = new Float32Array(STAR_COUNT * 3)
     for (let i = 0; i < STAR_COUNT; i++) {
-      // Uniform point on a sphere: theta uniform in [0, 2π), phi via
-      // acos(2v-1) so points don't bunch up at the poles.
       const theta = Math.random() * Math.PI * 2
       const phi = Math.acos(2 * Math.random() - 1)
       const sx = Math.sin(phi) * Math.cos(theta)
@@ -519,16 +504,11 @@ export function Scene({ telemetryRef, launched }: SceneProps) {
     rocketRef.current = rocket
     nozzleGroupRef.current = nozzleGroup
 
-    // ---- Descent/recovery chute (visual cue only, not physically
-    // simulated) ---- Positioned from the rocket's own bounding box rather
-    // than a hardcoded height, so this doesn't need to know buildRocket.ts's
-    // internal geometry stack (out of scope to read/edit in detail here).
-    // Parented to the rocket group so it automatically tracks position and
-    // tilt without needing its own per-frame position sync.
+    // ---- Descent/recovery chute ----
     const rocketTopY = new THREE.Box3().setFromObject(rocket).max.y
     const chuteMat = new THREE.MeshStandardMaterial({ color: 0xdd5522, roughness: 0.8, metalness: 0.0 })
     const chute = new THREE.Mesh(new THREE.ConeGeometry(0.25, 0.5, 12, 1, true), chuteMat)
-    chute.rotation.x = Math.PI // flip so the wide canopy is up, apex trails down toward the nose
+    chute.rotation.x = Math.PI
     chute.position.y = rocketTopY + 0.3
     chute.visible = false
     rocket.add(chute)
@@ -612,16 +592,11 @@ export function Scene({ telemetryRef, launched }: SceneProps) {
 
     const rocketWorldPos = new THREE.Vector3()
 
-    // ---- Ground-anchored tracking camera ----
-    // camera.position is fixed (set once at setup, near the pad) and never
-    // reassigned per frame — only the lookAt target (lerped, so it pans
-    // rather than snaps) and FOV (tightens with altitude) animate.
-    // cameraLookTarget persists across frames (the lerp target); starts
-    // matching the initial camera.lookAt(0, 3, 0) above so there's no jump
-    // on the first tracked frame. cameraDesiredTarget is a scratch vector
-    // reused each frame to avoid allocating in the render loop.
-    const cameraLookTarget = new THREE.Vector3(0, 3, 0)
-    const cameraDesiredTarget = new THREE.Vector3()
+    // ---- Fixed-offset chase camera ----
+    // Equidistant from the rocket at all times — the offset vector is
+    // constant, applied fresh each frame relative to the rocket's current
+    // world position, so the camera moves in lockstep on every axis.
+    const chaseOffset = new THREE.Vector3(9, 4, 13)
 
     // ---- Render loop ----
     function animate() {
@@ -641,7 +616,7 @@ export function Scene({ telemetryRef, launched }: SceneProps) {
       if (r && telemetry) {
         r.position.y = telemetry.altitude * ALTITUDE_SCALE
         r.position.x = telemetry.lateralOffset * ALTITUDE_SCALE
-        r.rotation.z = THREE.MathUtils.clamp(telemetry.velocity * 0.002, -0.15, 0.15)
+        r.rotation.z = -(telemetry.bodyAngle * Math.PI) / 180
 
         // ---- Nozzle gimbal rotation ----
         if (ng) {
@@ -662,18 +637,13 @@ export function Scene({ telemetryRef, launched }: SceneProps) {
           chuteRef.current.visible = telemetry.stage === 'apogee' || telemetry.stage === 'descent'
         }
 
-        // Camera position itself never moves (fixed at setup). Only the
-        // look target — lerped toward the rocket's current world position
-        // (including lateral drift from wind/gravity-turn, already baked
-        // into r.position.x/z) — and the FOV animate.
-        cameraDesiredTarget.set(r.position.x, r.position.y + 1, r.position.z)
-        cameraLookTarget.lerp(cameraDesiredTarget, CAMERA_LOOK_LERP)
-        camera.lookAt(cameraLookTarget)
-
-        const fovT = THREE.MathUtils.clamp(telemetry.altitude / CAMERA_FOV_TIGHTEN_FULL_ALT, 0, 1)
-        const fovEase = fovT * fovT * (3 - 2 * fovT)
-        camera.fov = THREE.MathUtils.lerp(CAMERA_FOV_MAX, CAMERA_FOV_MIN, fovEase)
-        camera.updateProjectionMatrix()
+        // ---- Fixed-offset chase camera ----
+        camera.position.set(
+          r.position.x + chaseOffset.x,
+          r.position.y + chaseOffset.y,
+          r.position.z + chaseOffset.z
+        )
+        camera.lookAt(r.position.x, r.position.y + 1, r.position.z)
 
         cumulusLayerRef.current?.update(elapsed, camera.position)
         stratusLayerRef.current?.update(elapsed, camera.position)
@@ -689,9 +659,10 @@ export function Scene({ telemetryRef, launched }: SceneProps) {
             plumeMat.uniforms.expansionFactor.value = expansionFactor
             plumeMat.uniforms.time.value = elapsed
             plume.position.set(r.position.x, r.position.y, r.position.z)
-            // Base rocket tilt (velocity-derived, set above) plus the
-            // nozzle's own gimbal deflection — same degrees->radians
-            // conversion already used for the nozzle mesh itself.
+            // Plume is a standalone scene object (not parented to the
+            // rocket group), so it needs the full world-space tilt:
+            // body angle plus the nozzle's own gimbal deflection relative
+            // to that body.
             plume.rotation.z = r.rotation.z + (telemetry.gimbalAngle * Math.PI) / 180
           }
         }
