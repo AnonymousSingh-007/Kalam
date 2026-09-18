@@ -7,7 +7,7 @@ const SCALE_HEIGHT = 8500
 const RAD_TO_DEG = 180 / Math.PI
 const DEG_TO_RAD = Math.PI / 180
 
-const GIMBAL_MAX_DEG = 25.0
+const GIMBAL_MAX_DEG = 12.0       // was 25.0 — reduced for less extreme nozzle deflection
 const GIMBAL_RATE_DEG_S = 30.0
 
 // ---- Rotational dynamics constants ----
@@ -16,16 +16,16 @@ const GIMBAL_RATE_DEG_S = 30.0
 // force produces. Larger arm = more torque per degree of gimbal.
 const MOMENT_ARM = 3.0
 // MOMENT_OF_INERTIA: resistance to angular acceleration. Larger = rocket
-// tilts more sluggishly for the same torque. Rough scale for a slender
-// rocket body, tuned for feel rather than derived from a real mass
-// distribution.
-const MOMENT_OF_INERTIA_BASE = 40.0
+// tilts more sluggishly for the same torque. Raised from 40 to 90 so the
+// rocket feels controlled and heavy rather than twitchy — a small key tap
+// no longer produces a violent snap-tilt.
+const MOMENT_OF_INERTIA_BASE = 90.0
 // AERO_RESTORING_COEFF: fins + body drag create a torque that pushes the
 // nose back toward the velocity vector (weathercocking) — proportional to
 // dynamic pressure and the current AoA-like misalignment between body
-// angle and velocity direction. This is what keeps the rocket stable and
-// stops it tumbling once you release the gimbal key.
-const AERO_RESTORING_COEFF = 0.6
+// angle and velocity direction. Softened from 0.6 to 0.4 so it corrects
+// the rocket without fighting the pilot's input too aggressively.
+const AERO_RESTORING_COEFF = 0.4
 const ANGULAR_DAMPING = 0.4 // energy loss in the rotational system, prevents oscillation
 
 export class RocketPhysicsEngine {
@@ -133,18 +133,9 @@ export class RocketPhysicsEngine {
     const rawThrust = burning ? this.params.thrust * this.thrustRampFactor() : 0
 
     // ---- Rotational dynamics ----
-    // The gimbal deflects the nozzle relative to the body axis. This
-    // produces a torque about the centre of mass proportional to
-    // thrust * sin(gimbalAngle) * momentArm. That torque angularly
-    // accelerates the body — the rocket doesn't snap to an angle, it
-    // spins up toward it and has to be actively countered to stop.
     const gimbalRad = this.gimbalAngle * DEG_TO_RAD
     const gimbalTorque = rawThrust * Math.sin(gimbalRad) * MOMENT_ARM
 
-    // Aerodynamic restoring torque (weathercocking): dynamic pressure
-    // times the angle between body axis and velocity vector, pushing
-    // the nose back toward prograde. Only meaningful once there's
-    // airspeed and altitude to generate real dynamic pressure.
     const speed = Math.sqrt(this.velocity * this.velocity + this.lateralVelocity * this.lateralVelocity)
     const dynamicPressure = 0.5 * rho * speed * speed
     const velocityAngle = speed > 0.5
@@ -153,27 +144,19 @@ export class RocketPhysicsEngine {
     const misalignment = this.bodyAngle - velocityAngle
     const restoringTorque = -misalignment * dynamicPressure * AERO_RESTORING_COEFF * 0.001
 
-    // Moment of inertia scales roughly with mass (heavier rocket = harder
-    // to rotate) — cheap approximation rather than a true inertia tensor.
     const momentOfInertia = MOMENT_OF_INERTIA_BASE * (mass / 100)
     const netTorque = gimbalTorque + restoringTorque
     const angularAcceleration = netTorque / momentOfInertia
 
     this.angularVelocity += angularAcceleration * dt
-    this.angularVelocity *= (1 - ANGULAR_DAMPING * dt) // damping bleeds off oscillation energy
+    this.angularVelocity *= (1 - ANGULAR_DAMPING * dt)
     this.bodyAngle += this.angularVelocity * dt
 
-    // Clamp body angle to something recoverable — real rockets that pass
-    // ~45° off vertical are considered lost; we cap harder for playability
     this.bodyAngle = Math.max(-60, Math.min(60, this.bodyAngle))
 
     const bodyRad = this.bodyAngle * DEG_TO_RAD
 
     // ---- Thrust vector in world space ----
-    // Thrust acts along the BODY axis (tilted by bodyAngle), not split
-    // by gimbal angle directly — the gimbal's job is done (it produced
-    // the torque that tilted the body); now the engine just pushes along
-    // wherever the body is currently pointing.
     const thrustVertical = rawThrust * Math.cos(bodyRad)
     const thrustLateral  = rawThrust * Math.sin(bodyRad)
 
