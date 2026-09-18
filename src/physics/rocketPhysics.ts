@@ -7,25 +7,25 @@ const SCALE_HEIGHT = 8500
 const RAD_TO_DEG = 180 / Math.PI
 const DEG_TO_RAD = Math.PI / 180
 
-const GIMBAL_MAX_DEG = 12.0       // was 25.0 — reduced for less extreme nozzle deflection
+const GIMBAL_MAX_DEG = 50.0       // was 25.0 — reduced for less extreme nozzle deflection
 const GIMBAL_RATE_DEG_S = 30.0
 
 // ---- Rotational dynamics constants ----
 // MOMENT_ARM: effective distance (m) from the rocket's centre of mass to
 // the gimbal pivot — determines how much torque a given lateral thrust
 // force produces. Larger arm = more torque per degree of gimbal.
-const MOMENT_ARM = 3.0
+const MOMENT_ARM = 5.0
 // MOMENT_OF_INERTIA: resistance to angular acceleration. Larger = rocket
 // tilts more sluggishly for the same torque. Raised from 40 to 90 so the
 // rocket feels controlled and heavy rather than twitchy — a small key tap
 // no longer produces a violent snap-tilt.
-const MOMENT_OF_INERTIA_BASE = 90.0
+const MOMENT_OF_INERTIA_BASE = 150.0
 // AERO_RESTORING_COEFF: fins + body drag create a torque that pushes the
 // nose back toward the velocity vector (weathercocking) — proportional to
 // dynamic pressure and the current AoA-like misalignment between body
 // angle and velocity direction. Softened from 0.6 to 0.4 so it corrects
 // the rocket without fighting the pilot's input too aggressively.
-const AERO_RESTORING_COEFF = 0.4
+const AERO_RESTORING_COEFF = 0.3  
 const ANGULAR_DAMPING = 0.4 // energy loss in the rotational system, prevents oscillation
 
 export class RocketPhysicsEngine {
