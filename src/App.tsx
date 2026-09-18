@@ -24,7 +24,9 @@ const EMPTY_TELEMETRY: Telemetry = {
   angleOfAttack: 0,
   axialGLoad: 0,
   lateralGLoad: 0,
-  gimbalAngle: 0
+  gimbalAngle: 0,
+  bodyAngle: 0,
+  angularVelocity: 0
 }
 
 function App() {

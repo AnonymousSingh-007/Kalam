@@ -5,31 +5,27 @@ export interface HandLandmark {
   z: number
 }
 
-// One detected hand: 21 landmarks + handedness
 export interface DetectedHand {
   landmarks: HandLandmark[]
   handedness: 'Left' | 'Right'
   score: number
 }
 
-// Output of fingerCount.ts (colleague's module)
-export type FingerCount = 0 | 1 | 2 | 3 | 4 | 5 | null // null = no confident reading
+export type FingerCount = 0 | 1 | 2 | 3 | 4 | 5 | null
 
-// Countdown state machine states
 export type CountdownState =
   | { phase: 'idle' }
   | { phase: 'counting'; expected: FingerCount; heldFrames: number }
   | { phase: 'armed' }
   | { phase: 'launched' }
 
-// Phase 2: Rocket physics
 export interface RocketParams {
-  thrust: number          // Newtons
-  dryMass: number         // kg — rocket structure, no fuel
-  propellantMass: number  // kg — fuel at launch
-  burnRate: number        // kg/s — propellant consumed per second
-  dragCoefficient: number // unitless, typical rockets ~0.3-0.75
-  crossSectionArea: number // m^2 — frontal area for drag calc
+  thrust: number
+  dryMass: number
+  propellantMass: number
+  burnRate: number
+  dragCoefficient: number
+  crossSectionArea: number
 }
 
 export type FlightStage =
@@ -51,10 +47,11 @@ export interface Telemetry {
   angleOfAttack: number
   axialGLoad: number
   lateralGLoad: number
-  gimbalAngle: number  // degrees, positive = tilting right, negative = left
+  gimbalAngle: number     // degrees, nozzle deflection relative to body
+  bodyAngle: number       // degrees, rocket body tilt from vertical (world frame)
+  angularVelocity: number // degrees/sec, rate of body rotation
 }
 
-// Phase 3: Sarcastic commentary
 export type CommentaryTrigger =
   | 'countdown'
   | 'pre-launch'
