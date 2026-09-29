@@ -8,6 +8,8 @@ import { ShaderPass } from 'three/examples/jsm/postprocessing/ShaderPass.js'
 import { CloudLayer } from './CloudLayer'
 import { buildRocket } from './buildRocket'
 import { buildGround, type GroundResult } from './buildGround'
+import { buildHorizon } from './buildHorizon'
+import { buildSun } from './buildSun'
 import type { Telemetry } from '../types'
 
 interface SceneProps {
@@ -313,6 +315,13 @@ export function Scene({ telemetryRef, launched }: SceneProps) {
     const ignitionLight = new THREE.PointLight(0xff6600, 0, 8)
     ignitionLight.position.set(0, 0.5, 0)
     scene.add(ignitionLight)
+
+    // ---- World backdrop ----
+    // Position/color read directly from the sun light above rather than
+    // re-hardcoded, so the visible disc can't silently drift from the
+    // actual light if it's retuned later.
+    buildHorizon(scene)
+    buildSun(scene, sun.position, sun.color)
 
     // ---- Cloud layers ----
     cumulusLayerRef.current = new CloudLayer(scene, 'cumulus', 30, 100, 0.65)
