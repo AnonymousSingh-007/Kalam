@@ -410,6 +410,8 @@ export class RocketPhysicsEngine {
     let machNumber = 0
     let thrustMagnitude = 0
     let currentIsp = 0
+    let axialG = 0
+    let lateralG = 0
 
     for (let i = 0; i < nSub; i++) {
       const result = this.subStep(subDt)
@@ -418,6 +420,8 @@ export class RocketPhysicsEngine {
       machNumber = result.mach
       thrustMagnitude = result.thrust
       currentIsp = result.isp
+      axialG = result.axialG
+      lateralG = result.lateralG
     }
 
     // Track records
@@ -427,7 +431,7 @@ export class RocketPhysicsEngine {
 
     this.updateStage()
 
-    return this.snapshot(angleOfAttack, dynamicPressure, machNumber, thrustMagnitude, currentIsp)
+    return this.snapshot(angleOfAttack, dynamicPressure, machNumber, thrustMagnitude, currentIsp, axialG, lateralG)
   }
 
   // ---------------------------------------------------------------
@@ -436,6 +440,7 @@ export class RocketPhysicsEngine {
 
   private subStep(dt: number): {
     aoa: number; qBar: number; mach: number; thrust: number; isp: number
+    axialG: number; lateralG: number
   } {
     const mass = this.currentMass()
 
@@ -574,6 +579,14 @@ export class RocketPhysicsEngine {
     this.accY = netForceY / mass
     this.accX = netForceX / mass
 
+    // G-loads: axial = along body axis (thrust/drag-dominated), lateral =
+    // perpendicular (steering/wind-dominated). Projected from world-frame
+    // acceleration onto the body axis using the current body angle.
+    const axialAccel = this.accY * Math.cos(bodyRad) + this.accX * Math.sin(bodyRad)
+    const lateralAccel = -this.accY * Math.sin(bodyRad) + this.accX * Math.cos(bodyRad)
+    const axialG = axialAccel / G0
+    const lateralG = lateralAccel / G0
+
     // Symplectic Euler (velocity first, then position)
     this.velY += this.accY * dt
     this.velX += this.accX * dt
@@ -640,6 +653,8 @@ export class RocketPhysicsEngine {
       mach: mach,
       thrust: thrustMag,
       isp: isp,
+      axialG: axialG,
+      lateralG: lateralG,
     }
   }
 
@@ -684,6 +699,8 @@ export class RocketPhysicsEngine {
     machNumber = 0,
     thrustMagnitude = 0,
     isp = 0,
+    axialG = 0,
+    lateralG = 0,
   ): Telemetry {
     const mass = this.currentMass()
     const g = G0 * (EARTH_RADIUS / (EARTH_RADIUS + this.posY)) ** 2
@@ -716,6 +733,10 @@ export class RocketPhysicsEngine {
       maxQ: parseFloat(this.maxQ.toFixed(2)),
       maxMach: parseFloat(this.maxMach.toFixed(4)),
       propellantRemaining: parseFloat(this.propellantRemaining.toFixed(2)),
+
+      // G-loads
+      axialGLoad: parseFloat(axialG.toFixed(3)),
+      lateralGLoad: parseFloat(lateralG.toFixed(3)),
     }
   }
 }
