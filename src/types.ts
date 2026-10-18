@@ -47,6 +47,10 @@ export interface Telemetry {
   maxQ: number            // Pa (max dynamic pressure seen so far)
   maxMach: number         // max Mach seen so far
   propellantRemaining: number // kg
+
+  // G-loads (retained for the instrument panel)
+  axialGLoad: number      // g (along body axis, thrust/drag derived)
+  lateralGLoad: number    // g (perpendicular, lateral accel derived)
 }
 
 export interface LaunchParams {
