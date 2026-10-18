@@ -26,7 +26,15 @@ const EMPTY_TELEMETRY: Telemetry = {
   lateralGLoad: 0,
   gimbalAngle: 0,
   bodyAngle: 0,
-  angularVelocity: 0
+  angularVelocity: 0,
+  dynamicPressure: 0,
+  machNumber: 0,
+  thrustNewtons: 0,
+  isp: 0,
+  twr: 0,
+  maxQ: 0,
+  maxMach: 0,
+  propellantRemaining: 0
 }
 
 function App() {
