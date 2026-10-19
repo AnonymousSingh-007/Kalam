@@ -85,12 +85,14 @@ export interface Telemetry {
   pitchRateCommand: number // deg/s
   attitudeTarget: number   // deg, attitude-hold target
   gimbalCommand: number    // deg
+  finAngle: number         // deg, movable aerodynamic control-fin deflection (+ve = nose-right torque)
 
   // Vehicle properties
   staticMargin: number     // calibers, (CP - CG) / diameter, low-speed
   centerOfGravity: number  // m from nose
   centerOfPressure: number // m from nose
   momentOfInertia: number  // kg·m², pitch
+  bodyLength: number       // m, physical rocket length (derived from reference area)
 
   // Environment (ISA 1976 + wind)
   airDensity: number       // kg/m³
