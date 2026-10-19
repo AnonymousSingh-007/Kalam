@@ -515,6 +515,11 @@ export function Scene({ telemetryRef, launched }: SceneProps) {
 
     // ---- Descent/recovery chute ----
     const rocketTopY = new THREE.Box3().setFromObject(rocket).max.y
+    // The group origin sits at the base of the engine skirt, so the model is
+    // rocketTopY tall. Used to pivot the model about its centre of gravity
+    // (the physics tracks the CG, not the tail).
+    const rocketHeight = rocketTopY
+    const rocketRadius = 0.36
     const chuteMat = new THREE.MeshStandardMaterial({ color: 0xdd5522, roughness: 0.8, metalness: 0.0 })
     const chute = new THREE.Mesh(new THREE.ConeGeometry(0.25, 0.5, 12, 1, true), chuteMat)
     chute.rotation.x = Math.PI
@@ -605,7 +610,9 @@ export function Scene({ telemetryRef, launched }: SceneProps) {
     // Equidistant from the rocket at all times — the offset vector is
     // constant, applied fresh each frame relative to the rocket's current
     // world position, so the camera moves in lockstep on every axis.
-    const chaseOffset = new THREE.Vector3(9, 4, 13)
+    // Nearly side-on (small azimuth) so a pitch to the left and a pitch to the
+    // right look like mirror images instead of one swinging toward the lens.
+    const chaseOffset = new THREE.Vector3(4, 3.5, 16)
 
     // ---- Render loop ----
     function animate() {
@@ -623,9 +630,25 @@ export function Scene({ telemetryRef, launched }: SceneProps) {
       const elapsed = clockRef.current.getElapsedTime()
 
       if (r && telemetry) {
-        r.position.y = telemetry.altitude * ALTITUDE_SCALE
-        r.position.x = telemetry.lateralOffset * ALTITUDE_SCALE
-        r.rotation.z = -(telemetry.bodyAngle * Math.PI) / 180
+        // ---- Pose: rotate the model about its centre of gravity ----
+        // The physics state is the CG's position and the body's pitch angle.
+        // The model's origin is at its base, so rotating the group directly
+        // would swing the whole rocket around its tail. Instead place the CG
+        // where the physics says it is and derive the base position from it.
+        const phi = -(telemetry.bodyAngle * Math.PI) / 180          // CCW-positive on screen
+        const cgFromBase = telemetry.bodyLength > 0
+          ? (1 - telemetry.centerOfGravity / telemetry.bodyLength) * rocketHeight
+          : 0.45 * rocketHeight
+        const cgX = telemetry.lateralOffset * ALTITUDE_SCALE
+        const cgY = telemetry.altitude * ALTITUDE_SCALE + cgFromBase
+        r.rotation.z = phi
+        r.position.x = cgX + cgFromBase * Math.sin(phi)
+        r.position.y = cgY - cgFromBase * Math.cos(phi)
+        // Keep any tilted body above the pad/ground (matters after a crash or
+        // a landing at an angle; zero effect for an upright rocket).
+        const lowest =
+          r.position.y + Math.min(0, rocketHeight * Math.cos(phi)) - rocketRadius * Math.abs(Math.sin(phi))
+        if (lowest < 0) r.position.y -= lowest
 
         // ---- Nozzle gimbal rotation ----
         if (ng) {
@@ -647,12 +670,13 @@ export function Scene({ telemetryRef, launched }: SceneProps) {
         }
 
         // ---- Fixed-offset chase camera ----
+        // Follow the CG so the rocket spins about the centre of the frame.
         camera.position.set(
-          r.position.x + chaseOffset.x,
-          r.position.y + chaseOffset.y,
+          cgX + chaseOffset.x,
+          cgY + chaseOffset.y,
           r.position.z + chaseOffset.z
         )
-        camera.lookAt(r.position.x, r.position.y + 1, r.position.z)
+        camera.lookAt(cgX, cgY, r.position.z)
 
         cumulusLayerRef.current?.update(elapsed, camera.position)
         stratusLayerRef.current?.update(elapsed, camera.position)
@@ -733,7 +757,7 @@ export function Scene({ telemetryRef, launched }: SceneProps) {
         heatUniforms.strength.value += (heatTarget - heatUniforms.strength.value) * 0.1
         heatUniforms.time.value = elapsed
 
-        rocketWorldPos.set(r.position.x, r.position.y + 1, r.position.z)
+        rocketWorldPos.set(cgX, cgY, r.position.z)
         rocketWorldPos.project(camera)
         heatUniforms.rocketScreenPos.value.set(
           (rocketWorldPos.x + 1) / 2,
@@ -757,15 +781,20 @@ export function Scene({ telemetryRef, launched }: SceneProps) {
         const isThrusting = telemetry.stage === 'powered-ascent'
         const posAttr = p.geometry.getAttribute('position') as THREE.BufferAttribute
         const vel = particleVelocities.current!
+        const baseX = r ? r.position.x : 0
         const baseY = r ? r.position.y : 0
+        // Exhaust leaves the nozzle opposite to the body axis (body axis up = (-sin, cos)).
+        const exX = r ? Math.sin(r.rotation.z) : 0
+        const exY = r ? -Math.cos(r.rotation.z) : -1
         for (let i = 0; i < PARTICLE_COUNT; i++) {
           const idx = i * 3
           if (isThrusting && Math.random() < 0.3) {
-            posAttr.array[idx] = (Math.random() - 0.5) * 0.25
+            const exSpeed = Math.random() * 0.1 + 0.05
+            posAttr.array[idx] = baseX + (Math.random() - 0.5) * 0.25
             posAttr.array[idx + 1] = baseY
             posAttr.array[idx + 2] = (Math.random() - 0.5) * 0.25
-            vel[idx] = (Math.random() - 0.5) * 0.05
-            vel[idx + 1] = -Math.random() * 0.1 - 0.05
+            vel[idx] = exX * exSpeed + (Math.random() - 0.5) * 0.05
+            vel[idx + 1] = exY * exSpeed + (Math.random() - 0.5) * 0.02
             vel[idx + 2] = (Math.random() - 0.5) * 0.05
           } else {
             posAttr.array[idx] += vel[idx]
@@ -843,6 +872,7 @@ export function Scene({ telemetryRef, launched }: SceneProps) {
 
   useEffect(() => {
     if (!launched && rocketRef.current) {
+      rocketRef.current.position.x = 0
       rocketRef.current.position.y = 0
       rocketRef.current.rotation.z = 0
     }
