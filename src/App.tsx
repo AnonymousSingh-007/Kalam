@@ -21,6 +21,7 @@ function App() {
   const gimbalInputRef = useRef<number>(0)
   const rafRef = useRef<number>(0)
   const lastTimeRef = useRef<number>(0)
+  const lastHudRef = useRef<number>(0)
 
   const [state, setState] = useState<CountdownState>(machine.getState())
   const [status, setStatus] = useState('Loading model...')
@@ -35,17 +36,28 @@ function App() {
 
     let cancelled = false
 
+    const held = { left: false, right: false }
+    const syncGimbal = () => {
+      gimbalInputRef.current = (held.right ? 1 : 0) - (held.left ? 1 : 0)
+    }
     function handleKeyDown(e: KeyboardEvent) {
-      if (e.key === 'ArrowLeft')  gimbalInputRef.current = -1
-      if (e.key === 'ArrowRight') gimbalInputRef.current = 1
+      if (e.key === 'ArrowLeft')  { held.left = true;  e.preventDefault() }
+      if (e.key === 'ArrowRight') { held.right = true; e.preventDefault() }
+      syncGimbal()
     }
     function handleKeyUp(e: KeyboardEvent) {
-      if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') {
-        gimbalInputRef.current = 0
-      }
+      if (e.key === 'ArrowLeft')  held.left = false
+      if (e.key === 'ArrowRight') held.right = false
+      syncGimbal()
+    }
+    function handleBlur() {
+      held.left = false
+      held.right = false
+      syncGimbal()
     }
     window.addEventListener('keydown', handleKeyDown)
     window.addEventListener('keyup', handleKeyUp)
+    window.addEventListener('blur', handleBlur)
 
     async function setup() {
       const tracker = new HandTracker()
@@ -104,7 +116,8 @@ function App() {
             )
           }
 
-          if (Math.floor(t.time * 10) % 2 === 0) {
+          if (timestamp - lastHudRef.current >= 100) {
+            lastHudRef.current = timestamp
             setTelemetryDisplay({ ...t })
           }
         }
@@ -121,6 +134,7 @@ function App() {
       trackerRef.current?.dispose()
       window.removeEventListener('keydown', handleKeyDown)
       window.removeEventListener('keyup', handleKeyUp)
+      window.removeEventListener('blur', handleBlur)
     }
   }, [])
 
