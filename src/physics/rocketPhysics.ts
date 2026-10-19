@@ -22,8 +22,11 @@
  *               the parallel-axis theorem, dI/dt term in the rotational eqn.
  *  CONTROL      rate-command attitude hold (flight computer): arrow keys
  *               command a pitch rate; on release it holds attitude. Torque is
- *               allocated to TVC (+-6 deg, rate and lag limited) then RCS
- *               cold gas (finite budget).
+ *               allocated across TVC (+-6 deg) and movable aerodynamic
+ *               control fins (+-15 deg, authority ~ dynamic pressure), shared
+ *               in proportion to available authority; RCS cold gas (finite
+ *               budget) mops up whatever is left. All actuators are rate and
+ *               lag limited.
  *  RECOVERY     drogue then main chute attached at the nose, forces evaluated
  *               at the attachment point velocity (gives real damping).
  *  GROUND       launch rail, hold-down, soft landing vs crash from impact
@@ -156,7 +159,7 @@ const NOSE_LEN_D = 3.0
 const FIN_N = 4
 const FIN_ROOT_D = 2.0
 const FIN_TIP_D = 0.5
-const FIN_SPAN_D = 0.6
+const FIN_SPAN_D = 0.8
 const FIN_SWEEP_D = 1.1
 
 const STRUCT_CG = 0.62        // fraction of length from nose
@@ -230,6 +233,13 @@ const K_THETA = 1.8                  // attitude-hold outer loop (1/s)
 const K_OMEGA = 6.0                  // rate inner loop (1/s)
 const RCS_ACCEL = 30 * RAD           // RCS angular-acceleration authority
 const RCS_DEADBAND = 0.04
+// Movable aerodynamic control fins (grid-fin / all-moving-fin class). Their
+// authority scales with dynamic pressure, so they take over from TVC exactly
+// where TVC runs out of torque against the airframe's own stiffness.
+const FIN_CTRL_MAX = 15 * RAD
+const FIN_CTRL_RATE = 80 * RAD
+const FIN_CTRL_TAU = 0.03
+const FIN_CTRL_EFF = 0.75           // control effectiveness relative to fin CN_alpha
 const ISP_COLD = 65
 
 // ═══════════════════════════ propulsion constants ═══════════════════════════
@@ -281,6 +291,7 @@ interface Ctx {
   Idot: number
   T: number
   gimbal: number
+  fin: number
   thrustFrac: number
   mdot: number
   tauRcs: number
@@ -315,6 +326,7 @@ export const EMPTY_TELEMETRY: Telemetry = {
   axialGLoad: 0, lateralGLoad: 0,
   airspeed: 0, flightPathAngle: 0, maxAltitude: 0,
   rcsFuel: 0, rcsTorque: 0, pitchRateCommand: 0, attitudeTarget: 0, gimbalCommand: 0,
+  finAngle: 0, bodyLength: 0,
   staticMargin: 0, centerOfGravity: 0, centerOfPressure: 0, momentOfInertia: 0,
   airDensity: 1.225, airPressure: 101325, airTemperature: 288.15, speedOfSound: 340.29,
   windSpeed: 0, cdAxial: 0, chuteState: 0, outcome: 'flying', impactSpeed: 0,
@@ -345,6 +357,7 @@ export class RocketPhysicsEngine {
   private rcsGas = 0
   private gimbal = 0
   private gimbalCmd = 0
+  private fin = 0
   private tauRcs = 0
   private lastT = 0
   private lastMdot = 0
@@ -409,6 +422,7 @@ export class RocketPhysicsEngine {
     this.tBurnout = null
     this.gimbal = 0
     this.gimbalCmd = 0
+    this.fin = 0
     this.tauRcs = 0
     this.lastT = 0
     this.lastMdot = 0
@@ -522,8 +536,8 @@ export class RocketPhysicsEngine {
     const nx = cT, ny = -sT
     const xcg = c.xcg
 
-    let Fa = 0, Fn = 0
-    let tauAero = 0, tauDamp = 0
+    let Fa = 0, Fn = 0, Fc = 0
+    let tauAero = 0, tauDamp = 0, tauFin = 0
     let alpha = 0, cdAxial = 0
 
     if (V > 0.05) {
@@ -546,6 +560,10 @@ export class RocketPhysicsEngine {
       const df = g.xFin - xcg
       tauAero = -(dn * Fnn + (g.xFin - xcg) * Fnf + (g.xCross - xcg) * Fnc)
       tauDamp = (-q * g.Aref * (CNA_NOSE * dn * dn + g.cnaFin * kM * df * df) * om) / Math.max(V, 5)
+
+      // movable control fins: force along +n for delta < 0, so +delta = nose-right torque
+      Fc = -q * g.Aref * g.cnaFin * kM * FIN_CTRL_EFF * c.fin
+      tauFin = -(g.xFin - xcg) * Fc
     }
 
     // thrust (force direction = body axis rotated by -gimbal)
@@ -568,8 +586,8 @@ export class RocketPhysicsEngine {
     }
 
     // non-gravitational force (what an accelerometer would read)
-    const ngx = Fa * bx + Fn * nx + tx + cx
-    const ngy = Fa * by + Fn * ny + ty + cy
+    const ngx = Fa * bx + (Fn + Fc) * nx + tx + cx
+    const ngy = Fa * by + (Fn + Fc) * ny + ty + cy
 
     const rr = R_EARTH / (R_EARTH + y)
     const grav = G0 * rr * rr
@@ -577,7 +595,7 @@ export class RocketPhysicsEngine {
     const ay = ngy / c.m - grav
 
     const tauPassive = tauAero + tauDamp + tauJet + tauChute
-    const tau = tauPassive + tauThrust + c.tauRcs
+    const tau = tauPassive + tauThrust + tauFin + c.tauRcs
     const dom = (tau - c.Idot * om) / c.I
 
     return {
@@ -625,7 +643,7 @@ export class RocketPhysicsEngine {
 
     // ---- flight computer ----
     const preCtx: Ctx = {
-      m: mp0.m, xcg: mp0.xcg, I: mp0.I, Idot: 0, T, gimbal: this.gimbal,
+      m: mp0.m, xcg: mp0.xcg, I: mp0.I, Idot: 0, T, gimbal: this.gimbal, fin: this.fin,
       thrustFrac: frac, mdot, tauRcs: 0, gust: this.gust, chuteCdS,
     }
     const pre = this.deriv(s, preCtx)
@@ -647,7 +665,7 @@ export class RocketPhysicsEngine {
     // ---- RK4 ----
     const ctx: Ctx = {
       m: mpm.m, xcg: mpm.xcg, I: mpm.I, Idot: (mp1.I - mp0.I) / h, T,
-      gimbal: this.gimbal, thrustFrac: frac, mdot, tauRcs: this.tauRcs,
+      gimbal: this.gimbal, fin: this.fin, thrustFrac: frac, mdot, tauRcs: this.tauRcs,
       gust: this.gust, chuteCdS,
     }
     const k1 = this.deriv(s, ctx)
@@ -689,6 +707,7 @@ export class RocketPhysicsEngine {
     const th = s[4], om = s[5]
     const arm = g.L - mp.xcg
     let gimCmd = 0
+    let finCmd = 0
     let tauRcs = 0
     let rcsUsed = 0
 
@@ -705,13 +724,33 @@ export class RocketPhysicsEngine {
         this.omegaCmd = omCmd
         const tauNeed = mp.I * K_OMEGA * (omCmd - om) - tauPassive
 
+        // control allocation: share the demanded torque between TVC and the
+        // aerodynamic fins in proportion to the authority each has right now
+        const sinMax = Math.sin(GIMBAL_MAX)
+        const tvcAuth = T > 1 && arm > 0.05 ? T * arm * sinMax : 0
+        const finLever = Math.max(g.xFin - mp.xcg, 0)
+        const finGain =
+          this.diag.q * g.Aref * g.cnaFin * finMachFactor(this.diag.mach) * FIN_CTRL_EFF * finLever // N*m per rad
+        const finAuth = finGain * FIN_CTRL_MAX
+        const authSum = tvcAuth + finAuth
+
         let tauGimbal = 0
-        if (T > 1 && arm > 0.05) {
-          const sinMax = Math.sin(GIMBAL_MAX)
-          gimCmd = Math.asin(clamp(tauNeed / (T * arm), -sinMax, sinMax))
-          tauGimbal = T * Math.sin(gimCmd) * arm
+        let tauFin = 0
+        if (authSum > 1e-9) {
+          const total = clamp(tauNeed, -authSum, authSum)
+          const tauG = (total * tvcAuth) / authSum
+          const tauF = (total * finAuth) / authSum
+          if (tvcAuth > 0) {
+            gimCmd = Math.asin(clamp(tauG / (T * arm), -sinMax, sinMax))
+            tauGimbal = T * Math.sin(gimCmd) * arm
+          }
+          if (finGain > 1e-9) {
+            finCmd = clamp(tauF / finGain, -FIN_CTRL_MAX, FIN_CTRL_MAX)
+            tauFin = finGain * finCmd
+          }
         }
-        const resid = tauNeed - tauGimbal
+
+        const resid = tauNeed - tauGimbal - tauFin
         if (Math.abs(resid) > RCS_DEADBAND * this.tauRcsMax && this.rcsGas > 0) {
           tauRcs = clamp(resid, -this.tauRcsMax, this.tauRcsMax)
           const thrusterForce = Math.abs(tauRcs) / g.rcsCouple
@@ -722,6 +761,7 @@ export class RocketPhysicsEngine {
       } else {
         this.omegaCmd = 0
         gimCmd = T > 1 ? this.pitchInput * GIMBAL_MAX : 0
+        finCmd = this.pitchInput * FIN_CTRL_MAX
       }
     } else {
       this.omegaCmd = 0
@@ -731,6 +771,11 @@ export class RocketPhysicsEngine {
     const rate = clamp((gimCmd - this.gimbal) / GIMBAL_TAU, -GIMBAL_RATE, GIMBAL_RATE)
     this.gimbal = clamp(this.gimbal + rate * h, -GIMBAL_MAX, GIMBAL_MAX)
     this.gimbalCmd = gimCmd
+
+    // control-fin actuator: same structure, faster and with its own travel limit
+    const frate = clamp((finCmd - this.fin) / FIN_CTRL_TAU, -FIN_CTRL_RATE, FIN_CTRL_RATE)
+    this.fin = clamp(this.fin + frate * h, -FIN_CTRL_MAX, FIN_CTRL_MAX)
+
     this.tauRcs = tauRcs
     setRcsUsed(rcsUsed)
   }
@@ -797,7 +842,7 @@ export class RocketPhysicsEngine {
         ? 'landed'
         : 'crashed'
     s[1] = 0; s[2] = 0; s[3] = 0; s[5] = 0
-    this.gimbal = 0; this.gimbalCmd = 0; this.tauRcs = 0
+    this.gimbal = 0; this.gimbalCmd = 0; this.fin = 0; this.tauRcs = 0
     this.lastT = 0; this.lastMdot = 0; this.lastFrac = 0
     this.omegaCmd = 0
   }
@@ -825,7 +870,7 @@ export class RocketPhysicsEngine {
     const d = this.diag
 
     const cnaN = CNA_NOSE
-    const cnaF = g.cnaFin
+    const cnaF = g.cnaFin * finMachFactor(d.mach)
     const xcp = (cnaN * g.xNose + cnaF * g.xFin) / (cnaN + cnaF)
     const rr = R_EARTH / (R_EARTH + s[1])
     const grav = G0 * rr * rr
@@ -869,6 +914,8 @@ export class RocketPhysicsEngine {
       pitchRateCommand: round(this.omegaCmd * DEG),
       attitudeTarget: round(this.attHold * DEG),
       gimbalCommand: round(this.gimbalCmd * DEG),
+      finAngle: round(this.fin * DEG),
+      bodyLength: round(g.L, 3),
 
       staticMargin: round((xcp - mp.xcg) / g.D),
       centerOfGravity: round(mp.xcg),
