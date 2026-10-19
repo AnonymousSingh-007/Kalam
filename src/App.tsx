@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import { HandTracker } from './hand/handTracker'
 import { countFingers } from './hand/fingerCount'
 import { CountdownMachine } from './state/countdownMachine'
-import { RocketPhysicsEngine } from './physics/rocketPhysics'
+import { RocketPhysicsEngine, EMPTY_TELEMETRY } from './physics/rocketPhysics'
 import { CommentaryEngine } from './commentary/commentaryEngine'
 import { ParamPanel } from './ui/ParamPanel'
 import { InstrumentPanel } from './ui/InstrumentPanel'
@@ -11,31 +11,6 @@ import type { CountdownState, Telemetry, RocketParams } from './types'
 import './App.css'
 
 const machine = new CountdownMachine()
-
-const EMPTY_TELEMETRY: Telemetry = {
-  time: 0,
-  altitude: 0,
-  velocity: 0,
-  acceleration: 0,
-  mass: 0,
-  stage: 'pre-launch',
-  lateralOffset: 0,
-  lateralVelocity: 0,
-  angleOfAttack: 0,
-  axialGLoad: 0,
-  lateralGLoad: 0,
-  gimbalAngle: 0,
-  bodyAngle: 0,
-  angularVelocity: 0,
-  dynamicPressure: 0,
-  machNumber: 0,
-  thrustNewtons: 0,
-  isp: 0,
-  twr: 0,
-  maxQ: 0,
-  maxMach: 0,
-  propellantRemaining: 0
-}
 
 function App() {
   const videoRef = useRef<HTMLVideoElement>(null)
@@ -120,8 +95,7 @@ function App() {
 
         const t = telemetryRef.current
         if (t) {
-          const airDensity = 1.225 * Math.exp(-t.altitude / 8500)
-          const line = commentaryEngineRef.current.tick(t, airDensity)
+          const line = commentaryEngineRef.current.tick(t, t.airDensity)
           if (line) setCommentary(line)
 
           if (t.altitude <= 0 && t.stage === 'descent' && t.time > 1) {
