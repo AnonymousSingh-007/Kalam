@@ -154,10 +154,10 @@ const BASE_RELIEF = 0.12      // power-on base-drag reduction (plume fills the b
 const FINENESS = 12
 const NOSE_LEN_D = 3.0
 const FIN_N = 4
-const FIN_ROOT_D = 1.4
+const FIN_ROOT_D = 2.0
 const FIN_TIP_D = 0.5
-const FIN_SPAN_D = 0.7
-const FIN_SWEEP_D = 0.7
+const FIN_SPAN_D = 0.6
+const FIN_SWEEP_D = 1.1
 
 const STRUCT_CG = 0.62        // fraction of length from nose
 const PROP_CG = 0.45
@@ -242,10 +242,11 @@ const TAILOFF = 0.25
 // ═══════════════════════════ recovery / landing constants ═══════════════════════════
 
 const CD_CHUTE = 1.5
-const CHUTE_INFLATE = 1.2
-const DROGUE_FRACTION = 0.1
-const CHUTE_Q_MAX = 2500
-const MAIN_ALT = 500
+const CHUTE_INFLATE = 2.0
+const DROGUE_FRACTION = 0.025
+const CHUTE_Q_MAX = 800
+const MAIN_ALT = 350
+const MAIN_Q_MAX = 1500
 const LAND_V_MAX = 9
 const LAND_TILT_MAX = 30 * RAD
 const LAND_SPIN_MAX = 45 * RAD
@@ -593,7 +594,6 @@ export class RocketPhysicsEngine {
   // ───────────────────────── one integration step ─────────────────────────
 
   private subStep(h: number): void {
-    const g = this.geom
     const s = this.s
 
     // ---- engine state ----
@@ -668,12 +668,11 @@ export class RocketPhysicsEngine {
     this.diag = k1.dg
 
     // ---- rail, pad and ground ----
-    this.applyConstraints(T)
+    this.applyConstraints()
 
     this.maxAltitude = Math.max(this.maxAltitude, s[1])
     this.maxQ = Math.max(this.maxQ, k1.dg.q)
     this.maxMach = Math.max(this.maxMach, k1.dg.mach)
-    void g
   }
 
   private addScaled(s: Vec6, d: Vec6, k: number): Vec6 {
@@ -716,8 +715,9 @@ export class RocketPhysicsEngine {
         if (Math.abs(resid) > RCS_DEADBAND * this.tauRcsMax && this.rcsGas > 0) {
           tauRcs = clamp(resid, -this.tauRcsMax, this.tauRcsMax)
           const thrusterForce = Math.abs(tauRcs) / g.rcsCouple
-          rcsUsed = Math.min(((2 * thrusterForce) / (ISP_COLD * G0)) * h, this.rcsGas)
-          if (rcsUsed < ((2 * thrusterForce) / (ISP_COLD * G0)) * h) tauRcs *= rcsUsed / (((2 * thrusterForce) / (ISP_COLD * G0)) * h)
+          const wanted = ((2 * thrusterForce) / (ISP_COLD * G0)) * h   // kg for the thruster pair
+          rcsUsed = Math.min(wanted, this.rcsGas)
+          if (wanted > 0) tauRcs *= rcsUsed / wanted                  // gas running out -> less torque
         }
       } else {
         this.omegaCmd = 0
@@ -745,7 +745,7 @@ export class RocketPhysicsEngine {
         this.tDrogue = this.time
       }
     } else if (this.chuteState === 1) {
-      if (s[3] < 0 && s[1] < MAIN_ALT && s[1] > 15 && q < CHUTE_Q_MAX) {
+      if (s[3] < 0 && s[1] < MAIN_ALT && s[1] > 15 && q < MAIN_Q_MAX) {
         this.chuteState = 2
         this.tMain = this.time
       }
@@ -763,7 +763,7 @@ export class RocketPhysicsEngine {
 
   // ───────────────────────── rail / ground ─────────────────────────
 
-  private applyConstraints(T: number): void {
+  private applyConstraints(): void {
     const s = this.s
     const g = this.geom
 
@@ -785,7 +785,6 @@ export class RocketPhysicsEngine {
       s[1] = 0
       s[3] = 0
     }
-    void T
   }
 
   private touchdown(): void {
