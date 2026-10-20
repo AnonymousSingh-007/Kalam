@@ -2,6 +2,7 @@ import type { CountdownState, FingerCount } from '../types'
 
 const HOLD_FRAMES_REQUIRED = 15 // ~0.5s at 30fps, avoids flicker triggering
 
+// idle → selecting → counting → armed → launched
 export class CountdownMachine {
   private state: CountdownState = { phase: 'idle' }
   private listeners: ((s: CountdownState) => void)[] = []
@@ -18,7 +19,15 @@ export class CountdownMachine {
     for (const cb of this.listeners) cb(this.state)
   }
 
+  // Enter vehicle selection (swipe to browse, clap to confirm).
   start(): void {
+    this.state = { phase: 'selecting' }
+    this.emit()
+  }
+
+  // Vehicle chosen: begin the 5 → 0 finger countdown.
+  confirmSelection(): void {
+    if (this.state.phase !== 'selecting') return
     this.state = { phase: 'counting', expected: 5, heldFrames: 0 }
     this.emit()
   }
