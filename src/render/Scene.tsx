@@ -6,15 +6,18 @@ import { UnrealBloomPass } from 'three/examples/jsm/postprocessing/UnrealBloomPa
 import { OutputPass } from 'three/examples/jsm/postprocessing/OutputPass.js'
 import { ShaderPass } from 'three/examples/jsm/postprocessing/ShaderPass.js'
 import { CloudLayer } from './CloudLayer'
-import { buildRocket } from './buildRocket'
+import { buildVehicle, type VehicleModel } from './buildRocket'
 import { buildGround, type GroundResult } from './buildGround'
 import { buildHorizon } from './buildHorizon'
 import { buildSun } from './buildSun'
-import type { Telemetry } from '../types'
+import type { Telemetry, VehicleId, QualityTier } from '../types'
 
 interface SceneProps {
   telemetryRef: React.MutableRefObject<Telemetry | null>
   launched: boolean
+  vehicleId: VehicleId
+  selecting: boolean
+  quality?: QualityTier
 }
 
 const ALTITUDE_SCALE = 0.05
@@ -195,7 +198,15 @@ const SKY_FRAGMENT_SHADER = `
   }
 `
 
-export function Scene({ telemetryRef, launched }: SceneProps) {
+export function Scene({ telemetryRef, launched, vehicleId, selecting, quality = 'medium' }: SceneProps) {
+  const swapRef = useRef<((id: VehicleId, q: QualityTier) => void) | null>(null)
+  const vehicleRef = useRef<VehicleId>(vehicleId)
+  const qualityRef = useRef<QualityTier>(quality)
+  const selectingRef = useRef(selecting)
+  const launchedRef = useRef(launched)
+  vehicleRef.current = vehicleId
+  selectingRef.current = selecting
+  launchedRef.current = launched
   const mountRef = useRef<HTMLDivElement>(null)
   const rocketRef = useRef<THREE.Group | null>(null)
   const nozzleGroupRef = useRef<THREE.Group | null>(null)
@@ -508,25 +519,46 @@ export function Scene({ telemetryRef, launched }: SceneProps) {
     const envMap = envRenderTarget.texture
     pmremGenerator.dispose()
 
-    // ---- Rocket ----
-    const { rocket, nozzleGroup } = buildRocket(scene, envMap)
-    rocketRef.current = rocket
-    nozzleGroupRef.current = nozzleGroup
-
-    // ---- Descent/recovery chute ----
-    const rocketTopY = new THREE.Box3().setFromObject(rocket).max.y
-    // The group origin sits at the base of the engine skirt, so the model is
-    // rocketTopY tall. Used to pivot the model about its centre of gravity
-    // (the physics tracks the CG, not the tail).
-    const rocketHeight = rocketTopY
-    const rocketRadius = 0.36
+    // ---- Rocket (swappable vehicle) ----
+    // The group origin sits at the base of the engine skirt; rocketHeight is
+    // used to pivot the model about its centre of gravity (the physics tracks
+    // the CG, not the tail).
+    let rocketHeight = 6
+    let rocketRadius = 0.36
+    let model: VehicleModel | null = null
     const chuteMat = new THREE.MeshStandardMaterial({ color: 0xdd5522, roughness: 0.8, metalness: 0.0 })
     const chute = new THREE.Mesh(new THREE.ConeGeometry(0.25, 0.5, 12, 1, true), chuteMat)
     chute.rotation.x = Math.PI
-    chute.position.y = rocketTopY + 0.3
     chute.visible = false
-    rocket.add(chute)
     chuteRef.current = chute
+
+    const swapVehicle = (id: VehicleId, q: QualityTier) => {
+      if (model) {
+        model.rocket.remove(chute)
+        scene.remove(model.rocket)
+        model.dispose()
+      }
+      model = buildVehicle(id, q, envMap)
+      const rocket = model.rocket
+      scene.add(rocket)
+      rocketRef.current = rocket
+      nozzleGroupRef.current = model.nozzleGroup
+      rocketHeight = model.height
+      const bb = new THREE.Box3().setFromObject(rocket)
+      rocketRadius = Math.max(Math.abs(bb.min.x), bb.max.x, 0.3)
+      chute.position.y = rocketHeight + 0.3
+      chute.visible = false
+      rocket.add(chute)
+    }
+    swapRef.current = swapVehicle
+    swapVehicle(vehicleRef.current, qualityRef.current)
+
+    // Selection-screen camera and adaptive quality bookkeeping.
+    const selectCam = new THREE.Vector3(1.2, 3.6, 11.5)
+    const idleCam = new THREE.Vector3(9, 4, 13)
+    let frameAcc = 0
+    let frameN = 0
+    let lastFrameT = performance.now()
 
     // ---- Plume ----
     const plumeGeo = new THREE.CylinderGeometry(0, 1, 1.5, 24, 32, true)
@@ -628,6 +660,37 @@ export function Scene({ telemetryRef, launched }: SceneProps) {
       const tLeftMat = trenchLeftMatRef.current
       const tRightMat = trenchRightMatRef.current
       const elapsed = clockRef.current.getElapsedTime()
+
+      const nowT = performance.now()
+      const frameMs = nowT - lastFrameT
+      lastFrameT = nowT
+      // Adaptive quality: if the average frame is slower than ~30 fps while
+      // sitting on the pad, step the vehicle detail down one tier.
+      if (frameMs < 250) { frameAcc += frameMs; frameN++ }
+      if (frameN >= 90) {
+        const avg = frameAcc / frameN
+        frameAcc = 0; frameN = 0
+        if (avg > 33 && !launchedRef.current && !telemetry) {
+          const next: QualityTier | null =
+            qualityRef.current === 'high' ? 'medium' : qualityRef.current === 'medium' ? 'low' : null
+          if (next) { qualityRef.current = next; swapVehicle(vehicleRef.current, next) }
+        }
+      }
+
+      if (r && !telemetry) {
+        // ---- Pad / selection: turntable + framing camera ----
+        if (selectingRef.current) {
+          r.rotation.y += (frameMs / 1000) * 0.6
+          camera.position.lerp(selectCam, 0.08)
+          camera.lookAt(0, rocketHeight * 0.48, 0)
+        } else {
+          const turn = Math.PI * 2
+          const target = Math.round(r.rotation.y / turn) * turn
+          r.rotation.y += (target - r.rotation.y) * 0.12
+          camera.position.lerp(idleCam, 0.08)
+          camera.lookAt(0, 3, 0)
+        }
+      }
 
       if (r && telemetry) {
         // ---- Pose: rotate the model about its centre of gravity ----
@@ -869,6 +932,15 @@ export function Scene({ telemetryRef, launched }: SceneProps) {
       composer.dispose(); renderer.dispose(); mount.removeChild(renderer.domElement)
     }
   }, [])
+
+  useEffect(() => {
+    if (!launchedRef.current) swapRef.current?.(vehicleId, qualityRef.current)
+  }, [vehicleId])
+
+  useEffect(() => {
+    qualityRef.current = quality
+    if (!launchedRef.current) swapRef.current?.(vehicleRef.current, quality)
+  }, [quality])
 
   useEffect(() => {
     if (!launched && rocketRef.current) {
