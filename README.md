@@ -14,22 +14,25 @@ Physics comes first. The renderer is a view of the telemetry stream; it never fe
 4. [Flight model](#flight-model)
 5. [Telemetry](#telemetry)
 6. [Rendering](#rendering)
-7. [Hand tracking and countdown](#hand-tracking-and-countdown)
-8. [Commentary engine](#commentary-engine)
-9. [Launch parameters](#launch-parameters)
-10. [Reference flight and validation](#reference-flight-and-validation)
-11. [Known limitations](#known-limitations)
-12. [Setup](#setup)
-13. [How to fly](#how-to-fly)
-14. [Project structure](#project-structure)
-15. [Tuning constants](#tuning-constants)
-16. [License](#license)
+7. [Vehicle selection and gestures](#vehicle-selection-and-gestures)
+8. [Hand tracking and countdown](#hand-tracking-and-countdown)
+9. [Commentary engine](#commentary-engine)
+10. [Launch parameters](#launch-parameters)
+11. [Reference flight and validation](#reference-flight-and-validation)
+12. [Known limitations](#known-limitations)
+13. [Setup](#setup)
+14. [How to fly](#how-to-fly)
+15. [Project structure](#project-structure)
+16. [Tuning constants](#tuning-constants)
+17. [Sponsorship](#sponsorship)
+18. [License](#license)
 
 ---
 
 ## Features
 
-- **Gesture-armed countdown.** In-browser hand landmark detection reads a finger count (5, 4, 3, 2, 1, fist) and steps a state machine `idle -> counting -> armed -> launched`. No buttons are needed to arm.
+- **Gesture-driven pre-launch.** In-browser hand landmark detection drives the whole pre-flight sequence: swipe to browse vehicles, clap to confirm, then a finger count (5, 4, 3, 2, 1, fist) steps the state machine `idle -> selecting -> counting -> armed -> launched`. No buttons are needed (keyboard and on-screen controls are available as fallbacks).
+- **Four selectable vehicles.** Four original, fully procedural launch-vehicle models (no image or model files) with panel seams, soot and clearcoat, built in three quality tiers with automatic step-down on slow GPUs. Vehicles are cosmetic for now: they share one flight model.
 - **Planar 3-DOF rigid-body physics.** State is `(x, y, vx, vy, theta, omega)`, integrated with RK4 in sub-steps of at most 5 ms.
 - **ISA 1976 atmosphere** (seven layers, chained base pressures, density from the ideal-gas law, geopotential altitude) with an altitude wind profile and mean-reverting gusts. Aerodynamics use air-relative velocity.
 - **Geometry derived from the launch parameters.** Reference area sets diameter and length; nose, fins, centre of gravity (CG), centre of pressure (CP), inertia and static margin all follow from it.
@@ -39,7 +42,7 @@ Physics comes first. The renderer is a view of the telemetry stream; it never fe
 - **Three-actuator flight computer.** Arrow keys command a pitch rate; on release the vehicle holds attitude. Demanded torque is shared between thrust vectoring and movable aerodynamic control fins in proportion to the authority each has at that instant; a finite cold-gas budget covers any remainder.
 - **Recovery.** Drogue then main parachute, attached at the nose, with forces evaluated at the attachment-point velocity (this produces real swing damping). Deployment is gated by dynamic pressure and altitude.
 - **Touchdown classification** by impact speed, tilt and spin rate: `landed` or `crashed`.
-- **3D renderer.** Multi-section rocket model pivoted about its centre of gravity, launch complex, plume expansion shader, flame trench flow, heat shimmer, procedural planet with atmosphere rim, starfield, volumetric clouds, bloom, chromatic aberration.
+- **3D renderer.** Selectable procedural rocket model pivoted about its centre of gravity, launch complex, plume expansion shader, flame trench flow, heat shimmer, procedural planet with atmosphere rim, starfield, volumetric clouds, bloom, chromatic aberration.
 - **Live instruments** for altitude, velocity, axial g, angle of attack, Mach, dynamic pressure, cold-gas remaining and nozzle deflection.
 - **Telemetry-aware commentary**, spoken with the Web Speech API.
 
@@ -48,7 +51,9 @@ Physics comes first. The renderer is a view of the telemetry stream; it never fe
 ## Architecture and data flow
 
 ```
- webcam --> hand tracker --> finger count --> countdown state machine
+ webcam --> hand tracker --+--> gesture detector (swipe / clap) --> vehicle choice
+                           |                                            |
+                           +--> finger count --> countdown state machine <-+
                                                      |
                                                   (armed)
                                                      v
@@ -235,7 +240,8 @@ The renderer reads the telemetry ref each frame. It contains no physics.
 - **Scale.** Altitude and lateral offset are multiplied by `ALTITUDE_SCALE = 0.05`, so one scene unit represents 20 m. The rocket model and launch complex are drawn at a larger, cinematic scale.
 - **Pose.** The model's origin is at the base of its engine section, but the physics state describes the CG. The CG's world position is `(lateralOffset, altitude + cgHeightAboveBase)` where `cgHeightAboveBase = (1 - centerOfGravity / bodyLength) * modelHeight`. The group is rotated by `-bodyAngle` and its position is solved so the CG lands exactly where the physics puts it, so a flip rotates the model about its CG. A ground clamp prevents any tilted body from sinking below the pad (no effect for an upright rocket).
 - **Camera.** Chase camera at a fixed offset of `(4, 3.5, 16)` from the CG, nearly side-on, looking at the CG, so left and right pitch are mirror images and the vehicle rotates about the centre of the frame.
-- **Rocket model.** Multi-section body: flared engine skirt, five-nozzle cluster with a gimbal-driven nozzle group, steel booster with panel seam rings, thermal interstage and taper, painted upper section with cold-gas thruster pods, ogive payload fairing, four swept delta fins. Metallic surfaces use an environment map. Tone mapping is ACES filmic.
+- **Rocket models.** Four vehicles are built by `buildVehicle(id, quality, envMap)` in `buildRocket.ts`. Bodies, domes, ogives and engine bells are lathe-revolved profiles; fins are bevelled extrusions; struts are cylinders; rivets are instanced spheres. All static parts are merged into one mesh per material, so a vehicle costs roughly 9 draw calls. A small shader patch adds per-pixel panel seams (an offset brick pattern from a per-vertex panel-coordinate attribute), exhaust soot that streaks up from the engine end, and low-frequency mottling, with no textures. Materials are PBR and use the scene environment map; the high tier adds clearcoat on painted surfaces and rivets. Tone mapping is ACES filmic. The model origin is the base of the engine skirt and the nozzle group pivots at the engine mount, so the gimbal animation is the same for every vehicle.
+- **Quality tiers.** `low`, `medium`, `high` change radial segment counts, clearcoat, soot and mottle detail, rivets and fin bevels. Measured with all four vehicles in one scene: low 36 draw calls / 20k triangles, medium 36 / 33k, high 40 / 82k (only one vehicle is ever shown at a time). While on the pad, if the average frame time exceeds about 33 ms over 90 frames, the scene rebuilds the vehicle one tier lower.
 - **Launch complex.** Textured pad, support legs, flame deflector, hold-down arms, tower, scorch decal. At ignition a dual-sided flame-trench shader fans out horizontally and a ground ignition cloud billows independent of rocket altitude.
 - **Plume.** A shader-deformed cone whose radius follows an expansion factor `1 - exp(-altitude / 8500 m)`: shock-disc structure at sea level, widening to a vacuum cone with altitude. Fresnel rim fade softens the silhouette. Exhaust particles are spawned at the nozzle and travel opposite to the body axis, so they follow the rocket through a flip.
 - **Planet.** A smooth full sphere (radius 420 scene units, 192 x 96 segments) coloured per pixel from five-octave domain-warped 3D noise: deep and shallow ocean, coastal foam, sand, lowland, highland and rock bands. Land is biased around the pad so the launch site is always on land. Because only colour varies, the physics ground (`y = 0`) always matches what is drawn. White clouds fade in from 150 to 1,800 m; a back-faced additive atmosphere shell supplies the blue limb glow, fading in from 500 to 3,500 m (camera is inside the shell near the ground). Ground detail noise at metre scale gives a sense of speed near the surface.
@@ -245,15 +251,39 @@ The renderer reads the telemetry ref each frame. It contains no physics.
 
 ---
 
+## Vehicle selection and gestures
+
+After the camera starts, the state machine enters `selecting`: the chosen vehicle turns slowly on the pad under a framing camera, with a name card, dot indicator and confirm button.
+
+| Input | Action |
+|---|---|
+| Open hand moved sideways | Next / previous vehicle (user's right = next) |
+| Clap (two hands) | Confirm and start the countdown |
+| Left / right arrow, Enter | Previous or next, confirm |
+| On-screen arrows and button | Same, for mouse and touch |
+
+Detection (`hand/gestures.ts`) works on raw, un-mirrored normalised landmark coordinates:
+
+- **Palm centre** is the mean of landmarks 0, 5, 9, 13, 17. **Hand size** is the wrist-to-middle-knuckle distance, which makes clap detection independent of distance from the camera.
+- **Swipe.** One hand with at least four fingers extended. Over a 450 ms window the palm centre must travel at least 0.25 of the image width, with vertical drift under 0.6 of the horizontal travel. A 700 ms cooldown follows.
+- **Clap.** Two hands present; palm-to-palm distance divided by mean hand size must fall below 1.6 after having exceeded 3.0 within the previous 500 ms. If the hands disappear within 250 ms of being seen closing (landmark detectors often lose overlapping palms), that also counts when the last distance was below 2.6. A 1.2 s cooldown follows.
+- Detector thresholds are constants at the top of the file and will need tuning for a given camera and room.
+
+The vehicle choice is cosmetic: all vehicles currently share one aerodynamic and propulsion model. Selection is frozen once the countdown starts.
+
+---
+
 ## Hand tracking and countdown
 
-- **Detection.** In-browser landmark detection with the GPU delegate; one hand is used. Each frame yields 21 landmarks per hand with handedness and a confidence score.
+- **Detection.** In-browser landmark detection with the GPU delegate, configured for two hands (needed by the clap gesture); the finger countdown reads the first hand. Each frame yields 21 landmarks per hand with handedness and a confidence score.
 - **Finger count.** A joint-angle heuristic per finger, handedness-aware for the thumb, returning 0 to 5 or `null` when no hand is present.
 - **State machine.**
 
 ```
-idle -> counting(expected, heldFrames) -> armed -> launched
+idle -> selecting -> counting(expected, heldFrames) -> armed -> launched
 ```
+
+  `selecting` ends with a clap or an explicit confirm.
 
   In `counting`, the expected digit steps 5, 4, 3, 2, 1, 0 (fist). The reading must match for a minimum number of consecutive frames (about 0.5 s) before the machine advances. `armed` unlocks the parameter panel and the Launch button.
 
@@ -316,6 +346,8 @@ Validation performed headlessly against the engine:
 - No structural failure model: loads are reported, but nothing breaks.
 - The wind sign is random per launch, so two otherwise identical launches can drift differently.
 - The Mach-dependent nose slope is held constant; only the fins carry the compressibility correction.
+- Vehicle models are cosmetic: they do not change mass properties, aerodynamics or propulsion, and the drag, fin and centre-of-gravity geometry is still derived from the reference area. The fin planform in the physics does not match each model's drawn fins.
+- Gesture thresholds are tuned on synthetic landmark data only and need calibration on real cameras; swipe direction depends on the camera not being mirrored in the raw feed.
 - The control fins are modelled in the physics and reported in telemetry (`finAngle`) but are not yet animated on the 3D model.
 - Scene scale is compressed (`ALTITUDE_SCALE = 0.05`) for readability; the planet curvature is deliberately exaggerated relative to a true-scale Earth.
 
@@ -339,11 +371,12 @@ npm run preview
 
 ## How to fly
 
-1. **Count down** with one hand: hold 5 fingers steady until it steps to 4, then 3, 2, 1, fist. Each digit must be held for about 0.5 s.
-2. **Set parameters** once armed. Watch the derived thrust-to-weight and burn time update. Launch is blocked below thrust-to-weight 1.
-3. **Launch.**
-4. **Steer.** Hold the left or right arrow key to command a pitch rate of up to 30 deg/s in that direction. Release to hold the current attitude. Holding for about 6 s turns the vehicle through 180 degrees.
-5. Watch the telemetry. Compare burn, coast, apogee, descent and touchdown against the reference flight, then change parameters and fly again.
+1. **Choose a vehicle.** Swipe an open hand sideways to browse, then clap (or press Enter) to confirm.
+2. **Count down** with one hand: hold 5 fingers steady until it steps to 4, then 3, 2, 1, fist. Each digit must be held for about 0.5 s.
+3. **Set parameters** once armed. Watch the derived thrust-to-weight and burn time update. Launch is blocked below thrust-to-weight 1.
+4. **Launch.**
+5. **Steer.** Hold the left or right arrow key to command a pitch rate of up to 30 deg/s in that direction. Release to hold the current attitude. Holding for about 6 s turns the vehicle through 180 degrees.
+6. Watch the telemetry. Compare burn, coast, apogee, descent and touchdown against the reference flight, then change parameters and fly again.
 
 ---
 
@@ -351,17 +384,18 @@ npm run preview
 
 ```
 src/
-├── types.ts                    # Shared data shapes: hand types, countdown state, rocket params, telemetry, commentary
+├── types.ts                    # Shared data shapes: hand types, countdown state, vehicle ids, rocket params, telemetry, commentary
 ├── hand/
-│   ├── handTracker.ts          # Hand landmark detector wrapper
-│   └── fingerCount.ts          # Landmark-based finger count (0-5)
+│   ├── handTracker.ts          # Hand landmark detector wrapper (two hands)
+│   ├── fingerCount.ts          # Landmark-based finger count (0-5)
+│   └── gestures.ts             # Swipe and clap detection
 ├── state/
-│   └── countdownMachine.ts     # idle -> counting -> armed -> launched
+│   └── countdownMachine.ts     # idle -> selecting -> counting -> armed -> launched
 ├── physics/
 │   └── rocketPhysics.ts        # Flight model: atmosphere, wind, aero, propulsion, mass, flight computer, recovery
 ├── render/
 │   ├── Scene.tsx               # Scene, shaders, post-processing, pose and camera
-│   ├── buildRocket.ts          # Rocket geometry (nozzle group, fins, fairing, seams)
+│   ├── buildRocket.ts          # Procedural vehicle kit: four vehicles, quality tiers, panel/soot shader
 │   ├── buildGround.ts          # Procedural planet and atmosphere rim
 │   ├── buildHorizon.ts         # Horizon backdrop
 │   ├── buildSun.ts             # Sun disc matched to the scene light
@@ -371,6 +405,8 @@ src/
 │   ├── commentaryEngine.ts     # Stage-transition and event trigger logic
 │   └── lines.ts                # Line bank: telemetry-aware templates for all triggers
 ├── ui/
+│   ├── VehicleSelect.tsx       # Vehicle picker overlay (name card, arrows, confirm)
+│   ├── VehicleSelect.css
 │   ├── ParamPanel.tsx          # Launch parameter inputs with live derived stats
 │   └── InstrumentPanel.tsx     # Gauges: altitude, velocity, axial g, AoA, Mach, q, cold gas, nozzle deflection
 └── App.tsx                     # Pipeline: webcam -> hand -> physics -> render -> commentary
@@ -404,6 +440,40 @@ The values below live at the top of `rocketPhysics.ts`.
 | `CD_CHUTE` / `CHUTE_INFLATE` / `DROGUE_FRACTION` | 1.5 / 2.0 s / 0.025 | Parachute |
 | `CHUTE_Q_MAX` / `MAIN_ALT` / `MAIN_Q_MAX` | 800 Pa / 350 m / 1,500 Pa | Deployment gates |
 | `LAND_V_MAX` / `LAND_TILT_MAX` / `LAND_SPIN_MAX` | 9 m/s / 30 deg / 45 deg/s | Landed versus crashed |
+
+---
+
+## Sponsorship
+
+Kalam is an independent, open-source project. It is built and maintained in spare time, and sponsorship is what lets the next stages of work happen faster and stay free for everyone to use and learn from.
+
+### What sponsorship funds
+
+- **Vehicle-specific physics.** Per-vehicle mass properties, staging, boosters, engine clusters and throttle profiles, so the four models stop being cosmetic.
+- **Structural failure model.** Load limits, breakup and debris, so a 21 g flip actually costs you the vehicle.
+- **Higher-fidelity rendering.** Cloud and plume improvements, an opt-in path-traced preview, per-vehicle launch pads, and control fins that move on the model.
+- **Hosting and distribution.** Keeping the hosted demo online and fast, including model and asset delivery.
+- **Calibration and accessibility.** Testing gesture detection across cameras, lighting and skin tones, adding touch and keyboard parity, and a low-power mode for older hardware.
+- **Education.** Lesson plans, a guided "why did my rocket flip?" mode, and documentation for classrooms and clubs.
+
+### Ways to support
+
+| Tier | Good for | What you get |
+|---|---|---|
+| **Supporter** | Individuals | Name in the credits, early access to builds |
+| **Builder** | Clubs, small teams | Everything above, plus a say in the roadmap order and a logo in the README |
+| **Launch Partner** | Companies, institutions | Everything above, plus a named vehicle livery or launch-pad branding in the simulator, and a short co-written write-up |
+| **In-kind** | Anyone | Cloud credits, hosting, GPUs for render testing, devices for camera calibration, or expert review of the physics |
+
+Sponsors never get control over the physics or the code. Branding is always clearly labelled, and sponsored content is optional and can be switched off by the user.
+
+### Research and academic collaboration
+
+The flight model is open for inspection and the validation scripts are reproducible. Universities, labs and student chapters interested in using Kalam for teaching or in extending the dynamics (6-DOF, aeroelasticity, guidance laws, Monte Carlo dispersion studies) are welcome to get in touch about collaboration, co-authorship and shared datasets.
+
+### How to get involved
+
+Open an issue or discussion in the repository titled "Sponsorship", or use the sponsor button on the repository page once it is enabled. Please include who you are, which tier or in-kind contribution you have in mind, and any timelines. Contributions of code, bug reports, and validation data are equally valuable and need no tier.
 
 ---
 
