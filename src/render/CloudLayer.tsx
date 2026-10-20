@@ -1,155 +1,217 @@
 import * as THREE from 'three'
+import type { QualityTier } from '../types'
+
+// Volumetric cloud layer driven by one shared, pre-baked 3D noise texture.
+//
+// The previous version evaluated several octaves of procedural Perlin and
+// Worley noise per ray step, which is far too expensive for integrated GPUs.
+// Here the noise is baked once on the CPU into a small tileable RGBA volume
+// (R = Perlin-Worley shape, G/B/A = Worley detail at rising frequency) and
+// every ray step is a texture fetch.
+//
+// Each layer is still one enclosing dome mesh whose only job is to trigger a
+// per-pixel march through its altitude slab (a ray crosses the dome once, so
+// the integral is never double counted). The dome follows the camera.
+//
+// Quality tiers change the volume size, step counts and whether lighting
+// samples the sun direction (self-shadowing) or uses a height gradient only.
 
 export type CloudType = 'cumulus' | 'stratus' | 'cirrus'
 
-// Radius of the enclosing sphere each layer uses as raymarch-trigger
-// geometry — see the comment in CloudLayer.init() for why a sphere replaced
-// the old flat plane. Matches the scene's fog-far distance (Scene.tsx) so
-// cloud rendering doesn't stay crisp well past where everything else has
-// already faded into fog.
-const CLOUD_DOME_RADIUS = 600
+const DOME_RADIUS = 600
+// Matches buildGround's planet (centre at y = -radius so the surface sits at y = 0).
+const PLANET_RADIUS = 420
 
-const NOISE_GLSL = `
-  float hash(vec3 p) {
-    p = fract(p * vec3(443.8975, 397.2973, 491.1871));
-    p += dot(p.zxy, p.yxz + 19.19);
-    return fract(p.x * p.y * p.z);
-  }
+// ═══════════════════════ baked 3D noise volume ═══════════════════════
 
-  vec3 perlinGrad(vec3 p) {
-    float h = hash(floor(p));
-    float angle = h * 6.2832;
-    float elev  = h * 3.1416 - 1.5708;
-    return vec3(cos(elev) * cos(angle), sin(elev), cos(elev) * sin(angle));
-  }
+const VOLUME_SIZE: Record<QualityTier, number> = { low: 32, medium: 48, high: 64 }
 
-  float perlin3(vec3 p) {
-    vec3 i = floor(p);
-    vec3 f = fract(p);
-    vec3 u = f * f * f * (f * (f * 6.0 - 15.0) + 10.0);
+function hash3(x: number, y: number, z: number, seed: number): number {
+  let h = Math.imul(x | 0, 374761393) ^ Math.imul(y | 0, 668265263) ^ Math.imul(z | 0, 1440662683) ^ Math.imul(seed, 2246822519)
+  h = Math.imul(h ^ (h >>> 15), 2246822519)
+  h = Math.imul(h ^ (h >>> 13), 3266489917)
+  h ^= h >>> 16
+  return (h >>> 0) / 4294967296
+}
 
-    float n000 = dot(perlinGrad(i + vec3(0,0,0)), f - vec3(0,0,0));
-    float n100 = dot(perlinGrad(i + vec3(1,0,0)), f - vec3(1,0,0));
-    float n010 = dot(perlinGrad(i + vec3(0,1,0)), f - vec3(0,1,0));
-    float n110 = dot(perlinGrad(i + vec3(1,1,0)), f - vec3(1,1,0));
-    float n001 = dot(perlinGrad(i + vec3(0,0,1)), f - vec3(0,0,1));
-    float n101 = dot(perlinGrad(i + vec3(1,0,1)), f - vec3(1,0,1));
-    float n011 = dot(perlinGrad(i + vec3(0,1,1)), f - vec3(0,1,1));
-    float n111 = dot(perlinGrad(i + vec3(1,1,1)), f - vec3(1,1,1));
+const wrap = (i: number, n: number): number => ((i % n) + n) % n
 
-    return mix(
-      mix(mix(n000, n100, u.x), mix(n010, n110, u.x), u.y),
-      mix(mix(n001, n101, u.x), mix(n011, n111, u.x), u.y),
-      u.z
-    );
-  }
-
-  float fbmPerlin(vec3 p, int octaves) {
-    float value = 0.0;
-    float amplitude = 1.0;
-    float frequency = 1.0;
-    float maxVal = 0.0;
-    for (int i = 0; i < 4; i++) {
-      if (i >= octaves) break;
-      value += perlin3(p * frequency) * amplitude;
-      maxVal += amplitude;
-      amplitude *= 0.5;
-      frequency *= 2.0;
-    }
-    return value / maxVal;
-  }
-
-  float worley3(vec3 p) {
-    vec3 i = floor(p);
-    float minDist = 10.0;
-    for (int dz = -1; dz <= 1; dz++) {
-      for (int dy = -1; dy <= 1; dy++) {
-        for (int dx = -1; dx <= 1; dx++) {
-          vec3 cell = i + vec3(float(dx), float(dy), float(dz));
-          float hx = hash(cell);
-          float hy = hash(cell + vec3(7.3, 0.0, 0.0));
-          float hz = hash(cell + vec3(0.0, 13.7, 0.0));
-          vec3 featurePoint = cell + vec3(hx, hy, hz);
-          float dist = length(p - featurePoint);
-          minDist = min(minDist, dist);
-        }
+// Tileable cellular noise: 1 at a feature point, falling to 0 a cell away.
+function worley(x: number, y: number, z: number, freq: number, seed: number): number {
+  const px = x * freq, py = y * freq, pz = z * freq
+  const ix = Math.floor(px), iy = Math.floor(py), iz = Math.floor(pz)
+  let best = 4
+  for (let dz = -1; dz <= 1; dz++) {
+    for (let dy = -1; dy <= 1; dy++) {
+      for (let dx = -1; dx <= 1; dx++) {
+        const cx = ix + dx, cy = iy + dy, cz = iz + dz
+        const wx = wrap(cx, freq), wy = wrap(cy, freq), wz = wrap(cz, freq)
+        const fx = cx + hash3(wx, wy, wz, seed) - px
+        const fy = cy + hash3(wx, wy, wz, seed + 11) - py
+        const fz = cz + hash3(wx, wy, wz, seed + 23) - pz
+        const d = fx * fx + fy * fy + fz * fz
+        if (d < best) best = d
       }
     }
-    return max(0.0, 1.0 - minDist);
   }
+  return Math.max(0, 1 - Math.sqrt(best))
+}
 
-  float fbmWorley(vec3 p, int octaves) {
-    float value = 0.0;
-    float amplitude = 1.0;
-    float frequency = 1.0;
-    float maxVal = 0.0;
-    for (int i = 0; i < 3; i++) {
-      if (i >= octaves) break;
-      value += worley3(p * frequency) * amplitude;
-      maxVal += amplitude;
-      amplitude *= 0.5;
-      frequency *= 2.0;
+function worleyFbm(x: number, y: number, z: number, freq: number, seed: number): number {
+  return 0.625 * worley(x, y, z, freq, seed) + 0.25 * worley(x, y, z, freq * 2, seed + 1) + 0.125 * worley(x, y, z, freq * 4, seed + 2)
+}
+
+function grad(ix: number, iy: number, iz: number, freq: number, seed: number, fx: number, fy: number, fz: number): number {
+  const wx = wrap(ix, freq), wy = wrap(iy, freq), wz = wrap(iz, freq)
+  let gx = hash3(wx, wy, wz, seed) * 2 - 1
+  let gy = hash3(wx, wy, wz, seed + 5) * 2 - 1
+  let gz = hash3(wx, wy, wz, seed + 9) * 2 - 1
+  const l = Math.hypot(gx, gy, gz) || 1
+  gx /= l; gy /= l; gz /= l
+  return gx * fx + gy * fy + gz * fz
+}
+
+function perlin(x: number, y: number, z: number, freq: number, seed: number): number {
+  const px = x * freq, py = y * freq, pz = z * freq
+  const ix = Math.floor(px), iy = Math.floor(py), iz = Math.floor(pz)
+  const fx = px - ix, fy = py - iy, fz = pz - iz
+  const u = fx * fx * fx * (fx * (fx * 6 - 15) + 10)
+  const v = fy * fy * fy * (fy * (fy * 6 - 15) + 10)
+  const w = fz * fz * fz * (fz * (fz * 6 - 15) + 10)
+  const g = (a: number, b: number, c: number): number => grad(ix + a, iy + b, iz + c, freq, seed, fx - a, fy - b, fz - c)
+  const x00 = g(0, 0, 0) + u * (g(1, 0, 0) - g(0, 0, 0))
+  const x10 = g(0, 1, 0) + u * (g(1, 1, 0) - g(0, 1, 0))
+  const x01 = g(0, 0, 1) + u * (g(1, 0, 1) - g(0, 0, 1))
+  const x11 = g(0, 1, 1) + u * (g(1, 1, 1) - g(0, 1, 1))
+  const y0 = x00 + v * (x10 - x00)
+  const y1 = x01 + v * (x11 - x01)
+  return y0 + w * (y1 - y0)
+}
+
+function perlinFbm(x: number, y: number, z: number, freq: number, seed: number): number {
+  return (perlin(x, y, z, freq, seed) * 0.5 + perlin(x, y, z, freq * 2, seed + 1) * 0.3 + perlin(x, y, z, freq * 4, seed + 2) * 0.2) * 0.5 + 0.5
+}
+
+function bakeVolume(n: number): Uint8Array<ArrayBuffer> {
+  const data = new Uint8Array(new ArrayBuffer(n * n * n * 4))
+  const q = (v: number): number => Math.max(0, Math.min(255, Math.round(v * 255)))
+  let o = 0
+  for (let k = 0; k < n; k++) {
+    for (let j = 0; j < n; j++) {
+      for (let i = 0; i < n; i++) {
+        const x = i / n, y = j / n, z = k / n
+        const pn = perlinFbm(x, y, z, 4, 3)
+        const wf = worleyFbm(x, y, z, 4, 17)
+        const lo = (1 - wf) * 0.6
+        data[o++] = q((pn - lo) / (1 - lo))          // R: Perlin-Worley shape
+        data[o++] = q(wf)                              // G: Worley detail, base frequency
+        data[o++] = q(worleyFbm(x, y, z, 8, 31))      // B: Worley detail, 2x
+        data[o++] = q(worley(x, y, z, 16, 47))        // A: fine Worley
+      }
     }
-    return value / maxVal;
   }
+  return data
+}
 
-  float perlinWorley(vec3 p) {
-    float pn = (fbmPerlin(p, 4) + 1.0) * 0.5;
-    float w  = fbmWorley(p, 3);
-    return smoothstep(0.0, 1.0, pn) * w;
+let sharedTex: THREE.Data3DTexture | null = null
+let sharedRefs = 0
+
+function acquireVolume(q: QualityTier): THREE.Data3DTexture {
+  if (!sharedTex) {
+    const n = VOLUME_SIZE[q]
+    const tex = new THREE.Data3DTexture(bakeVolume(n), n, n, n)
+    tex.format = THREE.RGBAFormat
+    tex.type = THREE.UnsignedByteType
+    tex.minFilter = THREE.LinearMipmapLinearFilter
+    tex.magFilter = THREE.LinearFilter
+    tex.wrapS = tex.wrapT = tex.wrapR = THREE.RepeatWrapping
+    tex.generateMipmaps = true
+    tex.unpackAlignment = 1
+    tex.needsUpdate = true
+    sharedTex = tex
   }
-`
+  sharedRefs++
+  return sharedTex
+}
 
-const CLOUD_VERTEX = `
+function releaseVolume(): void {
+  sharedRefs--
+  if (sharedRefs <= 0 && sharedTex) {
+    sharedTex.dispose()
+    sharedTex = null
+    sharedRefs = 0
+  }
+}
+
+// ═══════════════════════ shaders ═══════════════════════
+
+const CLOUD_VERTEX = /* glsl */ `
   varying vec3 vWorldPos;
-  varying vec2 vUv;
   void main() {
     vec4 wp = modelMatrix * vec4(position, 1.0);
     vWorldPos = wp.xyz;
-    vUv = uv;
-    gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+    gl_Position = projectionMatrix * viewMatrix * wp;
   }
 `
 
-const CLOUD_FRAGMENT = `
+const CLOUD_FRAGMENT = /* glsl */ `
+  precision highp sampler3D;
+  uniform sampler3D uNoise;
+  const float MAXD = float(MAX_DIST);
   uniform float uTime;
   uniform float uAltBase;
   uniform float uAltTop;
   uniform float uCoverage;
-  uniform int   uCloudType;
   uniform vec3  uCameraPos;
+  uniform vec3  uSunDir;
+  uniform vec3  uSunColor;
+  uniform vec3  uAmbTop;
+  uniform vec3  uAmbBot;
+  uniform vec3  uFogColor;
+  uniform vec2  uFogRange;
+  uniform vec4  uPlanet;    // xyz centre, w radius
+  uniform vec4  uOccluder;  // xyz centre, w radius (the rocket); w = 0 disables
 
   varying vec3 vWorldPos;
-  varying vec2 vUv;
 
-  ${NOISE_GLSL}
+  // CLOUD_TYPE: 0 cumulus, 1 stratus, 2 cirrus
+  // STEPS, LIGHT_STEPS, MAX_DIST are injected as defines.
 
-  float cloudDensity(vec3 p, float altNorm) {
-    float d;
-    if (uCloudType == 0) {
-      vec3 sp = vec3(p.x * 0.15 + uTime * 0.008, p.y * 0.4, p.z * 0.15 + uTime * 0.005);
-      float raw = perlinWorley(sp);
-      float env = smoothstep(0.0, 0.15, altNorm) * (1.0 - smoothstep(0.4, 1.0, altNorm));
-      d = max(0.0, raw * env * uCoverage);
-    } else if (uCloudType == 1) {
-      vec3 sp = vec3(p.x * 0.08 + uTime * 0.004, p.y * 0.2, p.z * 0.08 + uTime * 0.003);
-      float pn = (fbmPerlin(sp, 3) + 1.0) * 0.5;
-      float env = smoothstep(0.0, 0.1, altNorm) * (1.0 - smoothstep(0.85, 1.0, altNorm));
-      // Soft threshold instead of a hard linear cutoff (pn - 0.3, clamped at
-      // 0) — that had a discontinuous derivative right at the pn=0.3
-      // contour, which is what made stratus read as a hard-edged sheet.
-      float soft = smoothstep(0.25, 0.55, pn);
-      d = soft * env * uCoverage;
-    } else {
-      vec3 sp = vec3(p.x * 0.3 + uTime * 0.015, p.y * 0.6, p.z * 0.08);
-      float w = fbmWorley(sp, 2);
-      float env = smoothstep(0.0, 0.05, altNorm) * (1.0 - smoothstep(0.9, 1.0, altNorm));
-      d = max(0.0, w * 0.6 * env * uCoverage);
-    }
-    // Soft dissolve near the density field's own low-density boundary —
-    // replaces an implicit hard 0/nonzero cutoff with a smooth ramp so
-    // cloud silhouettes fade at the edge instead of cutting off sharply.
-    return d * smoothstep(0.0, 0.12, d);
+  float cloudDensity(vec3 p, float h) {
+    #if CLOUD_TYPE == 0
+      vec3 wind = vec3(uTime * 0.9, 0.0, uTime * 0.5);
+      vec3 q = (p + wind) * vec3(1.0 / 120.0, 1.0 / 90.0, 1.0 / 120.0);
+      float shape = texture(uNoise, q).r;
+      float cmap = texture(uNoise, vec3((p.x + wind.x * 0.3) * 0.0012, 0.37, p.z * 0.0012)).g;
+      float cov = clamp(uCoverage + 0.12 + (cmap - 0.45) * 1.0, 0.0, 1.0);
+      float hg = smoothstep(0.0, 0.10, h) * smoothstep(1.0, 0.45, h);
+      float d = shape * hg;
+      float thr = 1.0 - cov;
+      d = clamp((d - thr) / max(1.0 - thr, 0.05), 0.0, 1.0);
+      float det = texture(uNoise, q * 3.1).g * 0.65 + texture(uNoise, q * 7.3).b * 0.35;
+      d = clamp(d - 0.30 * det * (1.0 - d), 0.0, 1.0);
+      return d * 2.2;
+    #elif CLOUD_TYPE == 1
+      vec3 wind = vec3(uTime * 0.5, 0.0, uTime * 0.3);
+      vec3 q = (p + wind) * vec3(1.0 / 300.0, 1.0 / 90.0, 1.0 / 300.0);
+      float n = texture(uNoise, q).r * 0.65 + texture(uNoise, q * 2.7).g * 0.35;
+      float hg = smoothstep(0.0, 0.25, h) * smoothstep(1.0, 0.6, h);
+      float lo = 1.0 - uCoverage * 0.95;
+      float d = smoothstep(lo, lo + 0.30, n) * hg;
+      return d * 0.9;
+    #else
+      vec3 wind = vec3(uTime * 2.0, 0.0, 0.0);
+      vec3 q = (p + wind) * vec3(1.0 / 900.0, 1.0 / 260.0, 1.0 / 190.0);
+      float n = texture(uNoise, q).b * 0.7 + texture(uNoise, q * 2.3).a * 0.3;
+      float hg = smoothstep(0.0, 0.2, h) * smoothstep(1.0, 0.6, h);
+      float lo = 1.0 - uCoverage * 0.9;
+      return smoothstep(lo, lo + 0.18, n) * hg * 0.16;
+    #endif
+  }
+
+  float henyeyGreenstein(float cosT, float g) {
+    float g2 = g * g;
+    return (1.0 - g2) / (4.0 * 3.14159 * pow(1.0 + g2 - 2.0 * g * cosT, 1.5));
   }
 
   void main() {
@@ -157,161 +219,222 @@ const CLOUD_FRAGMENT = `
 
     float tBase, tTop;
     if (abs(rayDir.y) < 0.0001) {
-      if (vWorldPos.y < uAltBase || vWorldPos.y > uAltTop) discard;
-      tBase = 0.0; tTop = 200.0;
+      if (uCameraPos.y < uAltBase || uCameraPos.y > uAltTop) discard;
+      tBase = 0.0; tTop = MAXD;
     } else {
       tBase = (uAltBase - uCameraPos.y) / rayDir.y;
       tTop  = (uAltTop  - uCameraPos.y) / rayDir.y;
       if (tBase > tTop) { float tmp = tBase; tBase = tTop; tTop = tmp; }
     }
-
-    // The slab intersection above is unbounded — if the whole altitude band
-    // lies behind the camera (e.g. looking down at the ground from below a
-    // cumulus band), both tBase and tTop come out negative. Only tBase gets
-    // clamped to 0 below, so an unguarded tTop<0 case would march backwards
-    // (negative t = behind the camera) and could sample real noise values
-    // that coincidentally land inside the band, producing phantom cloud
-    // patches in the wrong part of the screen. This case was unreachable
-    // before (a flat plane at a single altitude never rasterized downward
-    // rays), but becomes reachable once the proxy geometry gives full
-    // screen coverage — see the geometry change in init() below.
     if (tTop <= 0.0) discard;
-
     tBase = max(tBase, 0.0);
-    float slabThickness = uAltTop - uAltBase;
+    if (tBase > MAXD) discard;
+    float tEnd = min(tTop, min(tBase + MAXD, MAXD * 1.6));
 
-    const int STEPS = 16;
-    // Cap the marched distance so grazing/near-horizontal rays (very long
-    // tTop-tBase) don't produce a handful of huge steps that each cross a
-    // big chunk of optical depth in one jump. That mismatch — long steps on
-    // shallow-angle rays, tiny steps on steep ones, with a fixed step COUNT
-    // — is what made clouds read as either an opaque wall or barely-there
-    // depending on view angle, rather than a genuine coverage/density issue.
-    float rayLength = min(tTop - tBase, 140.0);
-    float stepSize = rayLength / float(STEPS);
+    // The dome is drawn without depth testing (otherwise the ground hides
+    // every cloud below the camera), so occlusion is done analytically here:
+    // stop the march at the planet surface and at the rocket's bounding sphere.
+    {
+      vec3 oc = uCameraPos - uPlanet.xyz;
+      float b = dot(oc, rayDir);
+      float c = dot(oc, oc) - uPlanet.w * uPlanet.w;
+      float disc = b * b - c;
+      if (disc > 0.0 && c > 0.0) {
+        float tg = -b - sqrt(disc);
+        if (tg > 0.0) { if (tBase >= tg) discard; tEnd = min(tEnd, tg); }
+      }
+      if (uOccluder.w > 0.0) {
+        vec3 ro = uCameraPos - uOccluder.xyz;
+        float bo = dot(ro, rayDir);
+        float co = dot(ro, ro) - uOccluder.w * uOccluder.w;
+        float dO = bo * bo - co;
+        if (dO > 0.0 && co > 0.0) {
+          float to = -bo - sqrt(dO);
+          if (to > 0.0) { if (tBase >= to) discard; tEnd = min(tEnd, to); }
+        }
+      }
+    }
+    float stepSize = (tEnd - tBase) / float(STEPS);
+    float thickness = max(uAltTop - uAltBase, 0.001);
 
-    float transmittance = 1.0;
-    vec3 scatteredLight = vec3(0.0);
+    // Per-pixel jitter hides step banding at low step counts.
+    float jitter = fract(52.9829189 * fract(dot(gl_FragCoord.xy, vec2(0.06711056, 0.00583715))));
 
-    // Warm dawn-lit tops (matches the sky dome's horizon glow ~0xe0875f),
-    // cool muted purple-gray shadowed undersides (echoes the sky's
-    // 0x241a3d mid-tone) instead of neutral white/gray.
-    vec3 cloudTopColor  = vec3(1.0, 0.82, 0.62);
-    vec3 cloudBaseColor = vec3(0.35, 0.32, 0.42);
+    float cosSun = dot(rayDir, uSunDir);
+    float phase = mix(henyeyGreenstein(cosSun, 0.55), henyeyGreenstein(cosSun, -0.2), 0.35) * 4.0 * 3.14159 * 0.35 + 0.65;
+
+    float trans = 1.0;
+    vec3 light = vec3(0.0);
+    float firstT = -1.0;
 
     for (int i = 0; i < STEPS; i++) {
-      float t = tBase + (float(i) + 0.5) * stepSize;
-      vec3 samplePos = uCameraPos + rayDir * t;
+      float t = tBase + (float(i) + 0.5 + (jitter - 0.5) * 0.7) * stepSize;
+      vec3 sp = uCameraPos + rayDir * t;
+      float h = clamp((sp.y - uAltBase) / thickness, 0.0, 1.0);
+      float d = cloudDensity(sp, h);
+      if (d < 0.004) continue;
+      if (firstT < 0.0) firstT = t;
 
-      float altNorm = clamp(
-        (samplePos.y - uAltBase) / max(slabThickness, 0.001),
-        0.0, 1.0
-      );
+      float ext = d * min(stepSize, 14.0) * 0.14;
+      float stepT = exp(-ext);
 
-      float density = cloudDensity(samplePos, altNorm);
-      if (density < 0.001) continue;
+      // Sun visibility: march a few steps toward the sun, or fall back to a
+      // height gradient (brighter tops) on the low tier.
+      float sunVis;
+      #if LIGHT_STEPS > 0
+        float od = 0.0;
+        float ls = thickness * 0.35 / float(LIGHT_STEPS);
+        for (int k = 1; k <= LIGHT_STEPS; k++) {
+          vec3 lp = sp + uSunDir * (ls * float(k));
+          float lh = clamp((lp.y - uAltBase) / thickness, 0.0, 1.0);
+          od += cloudDensity(lp, lh) * ls * 0.14;
+        }
+        sunVis = exp(-od * 1.6) * (1.0 - exp(-d * 6.0) * 0.35) + 0.0;
+      #else
+        sunVis = mix(0.25, 1.0, h);
+      #endif
 
-      float extinction = density * stepSize * 0.6;
-      float sampleTransmittance = exp(-extinction);
-      vec3 sampleColor = mix(cloudBaseColor, cloudTopColor, altNorm);
-
-      scatteredLight += transmittance * (1.0 - sampleTransmittance) * sampleColor;
-      transmittance  *= sampleTransmittance;
-
-      if (transmittance < 0.01) break;
+      vec3 amb = mix(uAmbBot, uAmbTop, h);
+      vec3 col = amb + uSunColor * sunVis * phase;
+      light += trans * (1.0 - stepT) * col;
+      trans *= stepT;
+      if (trans < 0.02) break;
     }
 
-    float alpha = 1.0 - transmittance;
+    float alpha = 1.0 - trans;
     if (alpha < 0.01) discard;
 
-    gl_FragColor = vec4(scatteredLight / max(alpha, 0.001), alpha * 0.9);
+    vec3 color = light / max(alpha, 0.001);
+
+    // Distance fade into the scene fog so layers dissolve at the horizon
+    // together with everything else.
+    float dist = firstT < 0.0 ? tBase : firstT;
+    float fog = smoothstep(uFogRange.x, uFogRange.y, dist);
+    color = mix(color, uFogColor, fog);
+    alpha *= 1.0 - fog * 0.85;
+
+    gl_FragColor = vec4(color, alpha);
   }
 `
+
+interface TierParams { steps: number; light: number; maxDist: number }
+
+const TIER_PARAMS: Record<CloudType, Record<QualityTier, TierParams>> = {
+  cumulus: {
+    low:    { steps: 12, light: 0, maxDist: 220 },
+    medium: { steps: 18, light: 2, maxDist: 260 },
+    high:   { steps: 28, light: 4, maxDist: 320 },
+  },
+  stratus: {
+    low:    { steps: 6,  light: 0, maxDist: 160 },
+    medium: { steps: 10, light: 0, maxDist: 200 },
+    high:   { steps: 14, light: 2, maxDist: 240 },
+  },
+  cirrus: {
+    low:    { steps: 4, light: 0, maxDist: 700 },
+    medium: { steps: 6, light: 0, maxDist: 900 },
+    high:   { steps: 8, light: 0, maxDist: 1100 },
+  },
+}
 
 export class CloudLayer {
   private mesh: THREE.Mesh | null = null
   private mat: THREE.ShaderMaterial | null = null
+  private quality: QualityTier
 
   constructor(
     private scene: THREE.Scene,
     private type: CloudType,
     private altitudeBase: number,
     private altitudeTop: number,
-    private coverage: number
+    private coverage: number,
+    quality: QualityTier = 'medium'
   ) {
+    this.quality = quality
     this.init()
   }
 
-  private init() {
-    const typeIndex = this.type === 'cumulus' ? 0 : this.type === 'stratus' ? 1 : 2
+  private defines(): Record<string, number> {
+    const p = TIER_PARAMS[this.type][this.quality]
+    return {
+      CLOUD_TYPE: this.type === 'cumulus' ? 0 : this.type === 'stratus' ? 1 : 2,
+      STEPS: p.steps,
+      LIGHT_STEPS: p.light,
+      MAX_DIST: p.maxDist,
+    }
+  }
 
-    // The fragment shader's tBase/tTop slab intersection (see CLOUD_FRAGMENT
-    // above) is fully analytical — it intersects the ray against the
-    // uAltBase/uAltTop world-space planes directly and doesn't care what
-    // shape triggered the fragment. So the mesh here is purely a raymarch
-    // trigger, not a bound on the volume.
-    //
-    // The old geometry was a single flat 400x400 PlaneGeometry sitting at
-    // one fixed altitude. That's exactly why clouds read as flat slabs: a
-    // flat disc at a single Y only rasterizes to a reasonable footprint when
-    // viewed close to top-down. At the shallow, near-horizontal viewing
-    // angles this scene's low camera actually uses most of the time, the
-    // disc is seen near edge-on — it shrinks to almost nothing, or shows its
-    // hard rectangular boundary cutting across the sky. No finite flat plane
-    // fixes this; the screen-space footprint of a near-grazing ray against a
-    // fixed-Y plane blows up towards infinity.
-    //
-    // Fix: swap the flat disc for a large sphere centered on the origin
-    // (same technique as the sky dome above), rendered BackSide so the
-    // camera — which stays well inside it — sees the inner surface. A
-    // sphere presents a reasonable footprint from any viewing angle, and
-    // being a single convex enclosing surface, a ray crosses it exactly
-    // once — important because if a ray hit the geometry twice, the shader
-    // would run its *entire* independent slab raymarch twice and alpha-blend
-    // the results, roughly doubling apparent density/opacity. That
-    // double-hit risk is exactly why a literal "stack of several planes"
-    // fix was rejected: this shader already does a full analytical
-    // tBase-to-tTop integral per fragment, so any proxy geometry a ray can
-    // cross more than once would double-count that integral. A single
-    // enclosing sphere avoids this by construction.
-    const geo = new THREE.SphereGeometry(CLOUD_DOME_RADIUS, 32, 20)
-
+  private init(): void {
+    const fog = this.scene.fog as THREE.Fog | null
     const mat = new THREE.ShaderMaterial({
+      defines: this.defines(),
       uniforms: {
+        uNoise:     { value: acquireVolume(this.quality) },
         uTime:      { value: 0 },
         uAltBase:   { value: this.altitudeBase },
         uAltTop:    { value: this.altitudeTop },
         uCoverage:  { value: this.coverage },
-        uCloudType: { value: typeIndex },
-        uCameraPos: { value: new THREE.Vector3() }
+        uCameraPos: { value: new THREE.Vector3() },
+        uSunDir:    { value: new THREE.Vector3(0.4, 0.8, 0.4).normalize() },
+        uSunColor:  { value: new THREE.Color(1.0, 0.80, 0.58).multiplyScalar(1.1) },
+        uAmbTop:    { value: new THREE.Color(0.62, 0.56, 0.64) },
+        uAmbBot:    { value: new THREE.Color(0.26, 0.25, 0.34) },
+        uFogColor:  { value: fog ? fog.color.clone() : new THREE.Color(0xcf7c5c) },
+        uPlanet:    { value: new THREE.Vector4(0, -PLANET_RADIUS, 0, PLANET_RADIUS) },
+        uOccluder:  { value: new THREE.Vector4(0, 0, 0, 0) },
+        uFogRange:  { value: new THREE.Vector2(fog ? fog.near * 2 : 80, fog ? fog.far : 600) },
       },
       vertexShader: CLOUD_VERTEX,
       fragmentShader: CLOUD_FRAGMENT,
       transparent: true,
       depthWrite: false,
+      depthTest: false,
       side: THREE.BackSide,
-      blending: THREE.NormalBlending
+      blending: THREE.NormalBlending,
+      fog: false,
     })
 
-    const mesh = new THREE.Mesh(geo, mat)
+    const mesh = new THREE.Mesh(new THREE.SphereGeometry(DOME_RADIUS, 24, 14), mat)
     mesh.renderOrder = 1
-
+    mesh.frustumCulled = false
     this.scene.add(mesh)
     this.mesh = mesh
     this.mat = mat
   }
 
-  update(time: number, cameraPosition: THREE.Vector3) {
+  /** Direction *towards* the sun (need not be normalised) and its colour. */
+  setSun(direction: THREE.Vector3, color?: THREE.Color): void {
     if (!this.mat) return
-    this.mat.uniforms.uTime.value = time
-    this.mat.uniforms.uCameraPos.value.copy(cameraPosition)
+    this.mat.uniforms.uSunDir.value.copy(direction).normalize()
+    if (color) this.mat.uniforms.uSunColor.value.copy(color).multiplyScalar(1.1)
   }
 
-  dispose() {
+  /** Bounding sphere of the rocket so clouds behind it are not drawn over it. */
+  setOccluder(center: THREE.Vector3, radius: number): void {
+    if (!this.mat) return
+    this.mat.uniforms.uOccluder.value.set(center.x, center.y, center.z, radius)
+  }
+
+  setQuality(q: QualityTier): void {
+    if (!this.mat || q === this.quality) return
+    this.quality = q
+    this.mat.defines = this.defines()
+    this.mat.needsUpdate = true
+  }
+
+  update(time: number, cameraPosition: THREE.Vector3): void {
+    if (!this.mat || !this.mesh) return
+    this.mat.uniforms.uTime.value = time
+    this.mat.uniforms.uCameraPos.value.copy(cameraPosition)
+    this.mesh.position.copy(cameraPosition)
+  }
+
+  dispose(): void {
     if (this.mesh) {
       this.scene.remove(this.mesh)
       this.mesh.geometry.dispose()
       ;(this.mesh.material as THREE.ShaderMaterial).dispose()
+      releaseVolume()
       this.mesh = null
       this.mat = null
     }
