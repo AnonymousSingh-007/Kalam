@@ -1,4 +1,7 @@
 import * as THREE from 'three'
+import type { VehicleId, QualityTier } from '../types'
+
+export type { VehicleId, QualityTier }
 
 // Procedural launch-vehicle kit. Four original designs built entirely from
 // code: lathe profiles for bodies, domes, ogives and bells; extruded, bevelled
@@ -15,9 +18,6 @@ import * as THREE from 'three'
 // Contract with the scene: the group origin is the base of the engine skirt,
 // the rocket is built upright along +Y, and `nozzleGroup` is pivoted at the
 // engine mount so rotating it about Z gimbals the main engine(s).
-
-export type QualityTier = 'low' | 'medium' | 'high'
-export type VehicleId = 'strap' | 'reuse' | 'tower' | 'steel'
 
 export interface VehicleInfo {
   id: VehicleId
