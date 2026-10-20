@@ -335,9 +335,13 @@ export function Scene({ telemetryRef, launched, vehicleId, selecting, quality = 
     buildSun(scene, sun.position, sun.color)
 
     // ---- Cloud layers ----
-    cumulusLayerRef.current = new CloudLayer(scene, 'cumulus', 30, 100, 0.65)
-    stratusLayerRef.current = new CloudLayer(scene, 'stratus', 0, 30, 0.4)
-    cirrusLayerRef.current  = new CloudLayer(scene, 'cirrus', 300, 600, 0.5)
+    cumulusLayerRef.current = new CloudLayer(scene, 'cumulus', 30, 100, 0.65, qualityRef.current)
+    stratusLayerRef.current = new CloudLayer(scene, 'stratus', 0, 30, 0.4, qualityRef.current)
+    cirrusLayerRef.current  = new CloudLayer(scene, 'cirrus', 300, 600, 0.5, qualityRef.current)
+    for (const layer of [cumulusLayerRef.current, stratusLayerRef.current, cirrusLayerRef.current]) {
+      layer.setSun(sun.position, sun.color)
+    }
+    const cloudLayers = () => [cumulusLayerRef.current, stratusLayerRef.current, cirrusLayerRef.current]
 
     // ---- Ground ----
     const groundResult = buildGround()
@@ -637,6 +641,7 @@ export function Scene({ telemetryRef, launched, vehicleId, selecting, quality = 
     composer.addPass(new OutputPass())
 
     const rocketWorldPos = new THREE.Vector3()
+    const cloudOccluderPos = new THREE.Vector3()
 
     // ---- Fixed-offset chase camera ----
     // Equidistant from the rocket at all times — the offset vector is
@@ -673,7 +678,11 @@ export function Scene({ telemetryRef, launched, vehicleId, selecting, quality = 
         if (avg > 33 && !launchedRef.current && !telemetry) {
           const next: QualityTier | null =
             qualityRef.current === 'high' ? 'medium' : qualityRef.current === 'medium' ? 'low' : null
-          if (next) { qualityRef.current = next; swapVehicle(vehicleRef.current, next) }
+          if (next) {
+            qualityRef.current = next
+            swapVehicle(vehicleRef.current, next)
+            for (const l of cloudLayers()) l?.setQuality(next)
+          }
         }
       }
 
@@ -741,6 +750,8 @@ export function Scene({ telemetryRef, launched, vehicleId, selecting, quality = 
         )
         camera.lookAt(cgX, cgY, r.position.z)
 
+        cloudOccluderPos.set(cgX, cgY, r.position.z)
+        for (const l of cloudLayers()) l?.setOccluder(cloudOccluderPos, rocketHeight * 0.55)
         cumulusLayerRef.current?.update(elapsed, camera.position)
         stratusLayerRef.current?.update(elapsed, camera.position)
         cirrusLayerRef.current?.update(elapsed, camera.position)
@@ -939,6 +950,9 @@ export function Scene({ telemetryRef, launched, vehicleId, selecting, quality = 
 
   useEffect(() => {
     qualityRef.current = quality
+    cumulusLayerRef.current?.setQuality(quality)
+    stratusLayerRef.current?.setQuality(quality)
+    cirrusLayerRef.current?.setQuality(quality)
     if (!launchedRef.current) swapRef.current?.(vehicleRef.current, quality)
   }, [quality])
 
