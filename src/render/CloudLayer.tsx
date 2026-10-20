@@ -170,7 +170,8 @@ const CLOUD_FRAGMENT = /* glsl */ `
   uniform vec3  uFogColor;
   uniform vec2  uFogRange;
   uniform vec4  uPlanet;    // xyz centre, w radius
-  uniform vec4  uOccluder;  // xyz centre, w radius (the rocket); w = 0 disables
+  uniform vec3  uOccA;      // rocket axis: base point
+  uniform vec4  uOccB;      // rocket axis: top point (xyz), radius (w); w = 0 disables
 
   varying vec3 vWorldPos;
 
@@ -243,14 +244,23 @@ const CLOUD_FRAGMENT = /* glsl */ `
         float tg = -b - sqrt(disc);
         if (tg > 0.0) { if (tBase >= tg) discard; tEnd = min(tEnd, tg); }
       }
-      if (uOccluder.w > 0.0) {
-        vec3 ro = uCameraPos - uOccluder.xyz;
-        float bo = dot(ro, rayDir);
-        float co = dot(ro, ro) - uOccluder.w * uOccluder.w;
-        float dO = bo * bo - co;
-        if (dO > 0.0 && co > 0.0) {
-          float to = -bo - sqrt(dO);
-          if (to > 0.0) { if (tBase >= to) discard; tEnd = min(tEnd, to); }
+      if (uOccB.w > 0.0) {
+        // Ray vs finite cylinder along the rocket body: stop the march where
+        // the ray would reach the rocket so clouds behind it are not drawn
+        // over it, while clouds around and in front of it are unaffected.
+        vec3 ba = uOccB.xyz - uOccA;
+        vec3 oa = uCameraPos - uOccA;
+        float baba = dot(ba, ba);
+        float bard = dot(ba, rayDir);
+        float baoa = dot(ba, oa);
+        float k2 = baba - bard * bard;
+        float k1 = baba * dot(oa, rayDir) - baoa * bard;
+        float k0 = baba * dot(oa, oa) - baoa * baoa - uOccB.w * uOccB.w * baba;
+        float hh = k1 * k1 - k2 * k0;
+        if (hh > 0.0 && k2 > 1e-5) {
+          float to = (-k1 - sqrt(hh)) / k2;
+          float yy = baoa + to * bard;
+          if (to > 0.0 && yy > 0.0 && yy < baba) { if (tBase >= to) discard; tEnd = min(tEnd, to); }
         }
       }
     }
@@ -381,7 +391,8 @@ export class CloudLayer {
         uAmbBot:    { value: new THREE.Color(0.26, 0.25, 0.34) },
         uFogColor:  { value: fog ? fog.color.clone() : new THREE.Color(0xcf7c5c) },
         uPlanet:    { value: new THREE.Vector4(0, -PLANET_RADIUS, 0, PLANET_RADIUS) },
-        uOccluder:  { value: new THREE.Vector4(0, 0, 0, 0) },
+        uOccA:      { value: new THREE.Vector3() },
+        uOccB:      { value: new THREE.Vector4(0, 0, 0, 0) },
         uFogRange:  { value: new THREE.Vector2(fog ? fog.near * 2 : 80, fog ? fog.far : 600) },
       },
       vertexShader: CLOUD_VERTEX,
@@ -409,10 +420,11 @@ export class CloudLayer {
     if (color) this.mat.uniforms.uSunColor.value.copy(color).multiplyScalar(1.1)
   }
 
-  /** Bounding sphere of the rocket so clouds behind it are not drawn over it. */
-  setOccluder(center: THREE.Vector3, radius: number): void {
+  /** Rocket body as a cylinder (base, top, radius) so clouds behind it are not drawn over it. */
+  setOccluder(base: THREE.Vector3, top: THREE.Vector3, radius: number): void {
     if (!this.mat) return
-    this.mat.uniforms.uOccluder.value.set(center.x, center.y, center.z, radius)
+    this.mat.uniforms.uOccA.value.copy(base)
+    this.mat.uniforms.uOccB.value.set(top.x, top.y, top.z, radius)
   }
 
   setQuality(q: QualityTier): void {
