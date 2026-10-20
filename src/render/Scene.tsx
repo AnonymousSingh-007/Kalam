@@ -642,6 +642,7 @@ export function Scene({ telemetryRef, launched, vehicleId, selecting, quality = 
 
     const rocketWorldPos = new THREE.Vector3()
     const cloudOccluderPos = new THREE.Vector3()
+    const cloudOccluderTop = new THREE.Vector3()
 
     // ---- Fixed-offset chase camera ----
     // Equidistant from the rocket at all times — the offset vector is
@@ -750,8 +751,13 @@ export function Scene({ telemetryRef, launched, vehicleId, selecting, quality = 
         )
         camera.lookAt(cgX, cgY, r.position.z)
 
-        cloudOccluderPos.set(cgX, cgY, r.position.z)
-        for (const l of cloudLayers()) l?.setOccluder(cloudOccluderPos, rocketHeight * 0.55)
+        cloudOccluderPos.set(r.position.x, r.position.y, r.position.z)
+        cloudOccluderTop.set(
+          r.position.x - Math.sin(phi) * rocketHeight,
+          r.position.y + Math.cos(phi) * rocketHeight,
+          r.position.z
+        )
+        for (const l of cloudLayers()) l?.setOccluder(cloudOccluderPos, cloudOccluderTop, rocketRadius * 0.75)
         cumulusLayerRef.current?.update(elapsed, camera.position)
         stratusLayerRef.current?.update(elapsed, camera.position)
         cirrusLayerRef.current?.update(elapsed, camera.position)
