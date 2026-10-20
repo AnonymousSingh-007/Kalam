@@ -22,7 +22,7 @@ export class HandTracker {
         delegate: 'GPU'
       },
       runningMode: 'VIDEO',
-      numHands: 1,
+      numHands: 2, // two hands are needed for the clap gesture
       minHandDetectionConfidence: 0.6,
       minHandPresenceConfidence: 0.6,
       minTrackingConfidence: 0.6
