@@ -7,10 +7,14 @@ import { CommentaryEngine } from './commentary/commentaryEngine'
 import { ParamPanel } from './ui/ParamPanel'
 import { InstrumentPanel } from './ui/InstrumentPanel'
 import { Scene } from './render/Scene'
+import { VehicleSelect } from './ui/VehicleSelect'
+import { VEHICLES } from './render/buildRocket'
+import { GestureDetector } from './hand/gestures'
 import type { CountdownState, Telemetry, RocketParams } from './types'
 import './App.css'
 
 const machine = new CountdownMachine()
+const gestures = new GestureDetector()
 
 function App() {
   const videoRef = useRef<HTMLVideoElement>(null)
@@ -22,7 +26,11 @@ function App() {
   const rafRef = useRef<number>(0)
   const lastTimeRef = useRef<number>(0)
   const lastHudRef = useRef<number>(0)
+  const stepVehicleRef = useRef<(dir: 1 | -1) => void>(() => {})
+  const gestureTimerRef = useRef<number>(0)
 
+  const [vehicleIndex, setVehicleIndex] = useState(1)
+  const [lastGesture, setLastGesture] = useState('')
   const [state, setState] = useState<CountdownState>(machine.getState())
   const [status, setStatus] = useState('Loading model...')
   const [debug, setDebug] = useState('')
@@ -34,6 +42,16 @@ function App() {
   useEffect(() => {
     machine.onChange(setState)
 
+    const stepVehicle = (dir: 1 | -1) => {
+      setVehicleIndex((i) => (i + dir + VEHICLES.length) % VEHICLES.length)
+    }
+    stepVehicleRef.current = stepVehicle
+    const flashGesture = (msg: string) => {
+      setLastGesture(msg)
+      window.clearTimeout(gestureTimerRef.current)
+      gestureTimerRef.current = window.setTimeout(() => setLastGesture(''), 1200)
+    }
+
     let cancelled = false
 
     const held = { left: false, right: false }
@@ -41,6 +59,11 @@ function App() {
       gimbalInputRef.current = (held.right ? 1 : 0) - (held.left ? 1 : 0)
     }
     function handleKeyDown(e: KeyboardEvent) {
+      if (machine.getState().phase === 'selecting') {
+        if (e.key === 'ArrowLeft'  && !e.repeat) { stepVehicle(-1); e.preventDefault(); return }
+        if (e.key === 'ArrowRight' && !e.repeat) { stepVehicle(1);  e.preventDefault(); return }
+        if (e.key === 'Enter') { machine.confirmSelection(); e.preventDefault(); return }
+      }
       if (e.key === 'ArrowLeft')  { held.left = true;  e.preventDefault() }
       if (e.key === 'ArrowRight') { held.right = true; e.preventDefault() }
       syncGimbal()
@@ -89,6 +112,15 @@ function App() {
         )
         machine.tick(reading)
 
+        if (machine.getState().phase === 'selecting') {
+          const ev = gestures.update(hands, performance.now())
+          if (ev === 'swipe-right') { stepVehicle(1); flashGesture('Swipe → next') }
+          else if (ev === 'swipe-left') { stepVehicle(-1); flashGesture('Swipe ← previous') }
+          else if (ev === 'clap') { flashGesture('Clap — confirmed'); machine.confirmSelection() }
+        } else {
+          gestures.reset()
+        }
+
         if (machine.getState().phase === 'counting' && Math.random() < 0.02) {
           const snap = engineRef.current?.snapshot() ?? EMPTY_TELEMETRY
           const line = commentaryEngineRef.current.fireCountdown(snap)
@@ -135,6 +167,7 @@ function App() {
       window.removeEventListener('keydown', handleKeyDown)
       window.removeEventListener('keyup', handleKeyUp)
       window.removeEventListener('blur', handleBlur)
+      window.clearTimeout(gestureTimerRef.current)
     }
   }, [])
 
@@ -163,6 +196,7 @@ function App() {
 
   const phaseLabel: Record<CountdownState['phase'], string> = {
     idle: 'STANDBY',
+    selecting: 'CHOOSE VEHICLE',
     counting: 'AWAITING GESTURE',
     armed: 'ARMED — SET PARAMETERS',
     launched: 'IN FLIGHT'
@@ -185,7 +219,21 @@ function App() {
             isThrusting={telemetryDisplay?.stage === 'powered-ascent'}
           />
 
-          <Scene telemetryRef={telemetryRef} launched={launched} />
+          <Scene
+            telemetryRef={telemetryRef}
+            launched={launched}
+            vehicleId={VEHICLES[vehicleIndex].id}
+            selecting={state.phase === 'selecting'}
+          />
+
+          {state.phase === 'selecting' && (
+            <VehicleSelect
+              index={vehicleIndex}
+              lastGesture={lastGesture}
+              onStep={(d) => stepVehicleRef.current(d)}
+              onConfirm={() => machine.confirmSelection()}
+            />
+          )}
 
           <video ref={videoRef} className="webcam-pip" muted playsInline />
 
