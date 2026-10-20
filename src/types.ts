@@ -20,9 +20,16 @@ export type FingerCount = 0 | 1 | 2 | 3 | 4 | 5 | null
 
 export type CountdownState =
   | { phase: 'idle' }
+  | { phase: 'selecting' }
   | { phase: 'counting'; expected: FingerCount; heldFrames: number }
   | { phase: 'armed' }
   | { phase: 'launched' }
+
+// ───────────────────────── vehicles ─────────────────────────
+
+export type VehicleId = 'strap' | 'reuse' | 'tower' | 'steel'
+
+export type QualityTier = 'low' | 'medium' | 'high'
 
 // ───────────────────────── rocket physics ─────────────────────────
 
