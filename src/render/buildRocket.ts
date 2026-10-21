@@ -35,6 +35,17 @@ export const VEHICLES: VehicleInfo[] = [
 
 export const DEFAULT_VEHICLE: VehicleId = 'reuse'
 
+// Realistic heights in metres for each vehicle, used to scale the procedural
+// models to true-scale relative to the 6 371 km planet globe.
+// At ALTITUDE_SCALE 0.05, 1 scene unit = 20 m.
+const REALISTIC_HEIGHT_M: Record<VehicleId, number> = {
+  strap: 50,   // compact strap-on heavy lifter (≈GSLV class)
+  reuse: 70,   // reusable single-stack (≈Falcon 9 class)
+  tower: 98,   // tall with side boosters (≈SLS class)
+  steel: 120,  // bare-metal super-heavy (≈Starship class)
+}
+const HEIGHT_TO_SCENE = 0.05 // same as ALTITUDE_SCALE: metres → scene units
+
 export interface VehicleModel {
   rocket: THREE.Group
   nozzleGroup: THREE.Group
@@ -522,6 +533,13 @@ export function buildVehicle(id: VehicleId, quality: QualityTier = 'medium', env
   ctx.nozzleKit.build(nozzleGroup)
   rocket.add(nozzleGroup)
 
+  // Scale the model so its bounding-box height matches the vehicle's
+  // realistic height in scene units (REALISTIC_HEIGHT_M * HEIGHT_TO_SCENE).
+  const rawHeight = new THREE.Box3().setFromObject(rocket).max.y
+  const targetHeight = REALISTIC_HEIGHT_M[id] * HEIGHT_TO_SCENE
+  const scaleFactor = targetHeight / Math.max(rawHeight, 0.01)
+  rocket.scale.setScalar(scaleFactor)
+
   if (ctx.rivets.length > 0) {
     const rg = new THREE.SphereGeometry(0.009, 5, 4)
     const rm = new THREE.MeshStandardMaterial({ color: 0x6d7076, roughness: 0.4, metalness: 0.9, envMap, envMapIntensity: 0.9 })
@@ -532,7 +550,7 @@ export function buildVehicle(id: VehicleId, quality: QualityTier = 'medium', env
     rocket.add(inst)
   }
 
-  const height = new THREE.Box3().setFromObject(rocket).max.y
+  const height = new THREE.Box3().setFromObject(rocket).max.y  // post-scale
 
   const dispose = (): void => {
     rocket.traverse((o) => {
