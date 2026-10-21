@@ -160,6 +160,7 @@ const FRAG = /* glsl */ `
   uniform vec3  uCamPos;
   uniform float uNear;
   uniform float uFar;
+  uniform float uLogFarPlusOne;  // log2(far + 1) for log depth buffer decoding
   uniform float uTime;
   uniform vec3  uSunDir;
   uniform vec3  uSunColor;
@@ -303,12 +304,12 @@ const FRAG = /* glsl */ `
     vec3 rd = normalize((uCamWorld * vec4(dirV, 0.0)).xyz);
 
     // Distance along this ray to the nearest opaque surface.
+    // Logarithmic depth buffer: depth = log2(1+w) / log2(far+1).
     float depth = texture2D(tDepth, vUv).x;
     float tOpaque = 1e9;
     if (depth < 0.999999) {
-      float zn = depth * 2.0 - 1.0;
-      float lin = 2.0 * uNear * uFar / (uFar + uNear - zn * (uFar - uNear));
-      tOpaque = lin / max(-dirV.z, 1e-3);
+      float viewZ = exp2(depth * uLogFarPlusOne) - 1.0;
+      tOpaque = viewZ / max(-dirV.z, 1e-3);
     }
 
     float te[3];
@@ -354,7 +355,6 @@ export class CloudPass extends Pass {
   constructor(private camera: THREE.PerspectiveCamera, scene: THREE.Scene, quality: QualityTier = 'medium') {
     super()
     this.quality = quality
-    const fog = scene.fog as THREE.Fog | null
     this.mat = new THREE.ShaderMaterial({
       uniforms: {
         tDiffuse:   { value: null },
@@ -365,13 +365,14 @@ export class CloudPass extends Pass {
         uCamPos:    { value: new THREE.Vector3() },
         uNear:      { value: camera.near },
         uFar:       { value: camera.far },
+        uLogFarPlusOne: { value: Math.log2(camera.far + 1) },
         uTime:      { value: 0 },
         uSunDir:    { value: new THREE.Vector3(0.4, 0.8, 0.4).normalize() },
         uSunColor:  { value: new THREE.Color(1.0, 0.80, 0.58).multiplyScalar(1.1) },
         uAmbTop:    { value: new THREE.Color(0.62, 0.56, 0.64) },
         uAmbBot:    { value: new THREE.Color(0.26, 0.25, 0.34) },
-        uFogColor:  { value: fog ? fog.color.clone() : new THREE.Color(0xcf7c5c) },
-        uFogRange:  { value: new THREE.Vector2(fog ? fog.near * 2 : 80, fog ? fog.far : 600) },
+        uFogColor:  { value: new THREE.Color(0xcf7c5c) },
+        uFogRange:  { value: new THREE.Vector2(80, 600) },
         uAltBase:   { value: new THREE.Vector3(0, 30, 300) },
         uAltTop:    { value: new THREE.Vector3(30, 100, 600) },
         uCoverage:  { value: new THREE.Vector3(0.4, 0.65, 0.5) },
@@ -425,6 +426,7 @@ export class CloudPass extends Pass {
     u.uCamPos.value.setFromMatrixPosition(this.camera.matrixWorld)
     u.uNear.value = this.camera.near
     u.uFar.value = this.camera.far
+    u.uLogFarPlusOne.value = Math.log2(this.camera.far + 1)
     renderer.setRenderTarget(this.renderToScreen ? null : writeBuffer)
     this.quad.render(renderer)
   }
