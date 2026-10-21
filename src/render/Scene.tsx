@@ -8,7 +8,6 @@ import { ShaderPass } from 'three/examples/jsm/postprocessing/ShaderPass.js'
 import { CloudPass } from './CloudPass'
 import { buildVehicle, type VehicleModel } from './buildRocket'
 import { buildGround, type GroundResult } from './buildGround'
-import { buildHorizon } from './buildHorizon'
 import { buildSun } from './buildSun'
 import type { Telemetry, VehicleId, QualityTier } from '../types'
 
@@ -250,7 +249,7 @@ export function Scene({ telemetryRef, launched, vehicleId, selecting, quality = 
       exponent:    { value: 0.5 }
     }
     scene.add(new THREE.Mesh(
-      new THREE.SphereGeometry(2000, 48, 32),
+      new THREE.SphereGeometry(600000, 48, 32),
       new THREE.ShaderMaterial({
         uniforms: skyUniforms,
         vertexShader: SKY_VERTEX_SHADER,
@@ -259,11 +258,12 @@ export function Scene({ telemetryRef, launched, vehicleId, selecting, quality = 
         depthWrite: false
       })
     ))
-    scene.fog = new THREE.Fog(0xcf7c5c, 40, 600)
+    // No scene fog — the true-scale planet is 318 km radius in scene units;
+    // fog would hide the entire globe.
 
     // ---- Starfield ----
     const STAR_COUNT = 2000
-    const STAR_RADIUS = 1900
+    const STAR_RADIUS = 500000
     const starPositions = new Float32Array(STAR_COUNT * 3)
     for (let i = 0; i < STAR_COUNT; i++) {
       const theta = Math.random() * Math.PI * 2
@@ -288,11 +288,11 @@ export function Scene({ telemetryRef, launched, vehicleId, selecting, quality = 
     scene.add(new THREE.Points(starGeo, starMat))
     starMatRef.current = starMat
 
-    const camera = new THREE.PerspectiveCamera(50, width / height, 0.1, 4000)
+    const camera = new THREE.PerspectiveCamera(50, width / height, 0.1, 800000)
     camera.position.set(9, 4, 13)
     camera.lookAt(0, 3, 0)
 
-    const renderer = new THREE.WebGLRenderer({ antialias: true })
+    const renderer = new THREE.WebGLRenderer({ antialias: true, logarithmicDepthBuffer: true })
     renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2))
     renderer.setSize(width, height, true)
     renderer.shadowMap.enabled = true
@@ -325,11 +325,9 @@ export function Scene({ telemetryRef, launched, vehicleId, selecting, quality = 
     ignitionLight.position.set(0, 0.5, 0)
     scene.add(ignitionLight)
 
-    // ---- World backdrop ----
-    // Position/color read directly from the sun light above rather than
-    // re-hardcoded, so the visible disc can't silently drift from the
-    // actual light if it's retuned later.
-    buildHorizon(scene)
+    // ---- Sun disc ----
+    // Position/color read directly from the sun light above.
+    // No buildHorizon — the true-scale planet curvature IS the horizon.
     buildSun(scene, sun.position, sun.color)
 
     // ---- Cloud layers ----
@@ -647,13 +645,20 @@ export function Scene({ telemetryRef, launched, vehicleId, selecting, quality = 
 
     const rocketWorldPos = new THREE.Vector3()
 
-    // ---- Fixed-offset chase camera ----
-    // Equidistant from the rocket at all times — the offset vector is
-    // constant, applied fresh each frame relative to the rocket's current
-    // world position, so the camera moves in lockstep on every axis.
-    // Nearly side-on (small azimuth) so a pitch to the left and a pitch to the
-    // right look like mirror images instead of one swinging toward the lens.
-    const chaseOffset = new THREE.Vector3(4, 3.5, 16)
+    // ---- Dynamic chase camera ----
+    // Pulls back with altitude so the globe becomes visible as the rocket
+    // climbs. At ground level the offset matches the old fixed chase camera;
+    // at orbital altitude the camera sits far enough to frame the planet.
+    const baseChaseOffset = new THREE.Vector3(4, 3.5, 16)
+    const chaseOffset = baseChaseOffset.clone()
+    function updateChaseScale(altitudeSceneUnits: number) {
+      // altitudeSceneUnits is altitude * ALTITUDE_SCALE (0.05).
+      // At 0 altitude → scale 1; at ~300 km (15000 units) → scale ~40.
+      // Uses a smooth log ramp so the pullback feels natural.
+      const altKm = altitudeSceneUnits * 0.02 // 1 unit = 20m = 0.02 km
+      const scale = 1 + Math.log1p(altKm * 0.5) * 4
+      chaseOffset.copy(baseChaseOffset).multiplyScalar(scale)
+    }
 
     // ---- Render loop ----
     function animate() {
@@ -746,8 +751,9 @@ export function Scene({ telemetryRef, launched, vehicleId, selecting, quality = 
           chuteRef.current.visible = telemetry.stage === 'apogee' || telemetry.stage === 'descent'
         }
 
-        // ---- Fixed-offset chase camera ----
-        // Follow the CG so the rocket spins about the centre of the frame.
+        // ---- Dynamic chase camera ----
+        // Follow the CG; pull back with altitude to reveal the globe.
+        updateChaseScale(telemetry.altitude * ALTITUDE_SCALE)
         camera.position.set(
           cgX + chaseOffset.x,
           cgY + chaseOffset.y,
