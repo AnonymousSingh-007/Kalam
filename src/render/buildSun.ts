@@ -5,19 +5,19 @@ import * as THREE from 'three'
 // passed in from Scene.tsx's existing sun light definition (not
 // re-hardcoded here) so the two can't silently drift apart if the light
 // is retuned later.
-const SUN_DISTANCE = 1800 // scene units — inside the sky dome's 2000 radius
-const SUN_RADIUS = 60
+//
+// Scaled for the true-scale planet: the disc sits inside the sky dome
+// (radius 600 000) and subtends roughly 0.5° — close to the real sun's
+// apparent size.
+
+const SUN_DISTANCE = 400000
+const SUN_RADIUS = 1800
 
 // Scene.tsx's UnrealBloomPass threshold is 0.8, and ACES tone mapping is
 // active on the renderer. toneMapped=false on this material (below) skips
 // the tonemapping shader chunk for this material's own draw call, so its
 // raw (overbright) color reaches UnrealBloomPass's luminance threshold
-// check at full strength while still inside the composer pipeline, instead
-// of being compressed toward 1.0 by ACES first — the standard three.js
-// technique for HDR-ish emissive elements feeding a tonemapped bloom
-// pipeline. The final composited frame (scene + bloom glow) still gets
-// tonemapped once, at OutputPass, same as everything else, so this reads
-// as a bright core with a soft blown-out edge, not a flat colored circle.
+// check at full strength while still inside the composer pipeline.
 const SUN_BRIGHTNESS = 3.5
 
 export function buildSun(
