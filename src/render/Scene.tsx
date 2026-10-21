@@ -651,14 +651,25 @@ export function Scene({ telemetryRef, launched, vehicleId, selecting, quality = 
     // at orbital altitude the camera sits far enough to frame the planet.
     const baseChaseOffset = new THREE.Vector3(4, 3.5, 16)
     const chaseOffset = baseChaseOffset.clone()
+    // User-adjustable zoom multiplier: 1 = default, <1 zoomed in, >1 zoomed out.
+    // Controlled via scroll wheel; clamped so the user can't lose the rocket.
+    let userZoom = 1
+    const ZOOM_MIN = 0.15
+    const ZOOM_MAX = 6
     function updateChaseScale(altitudeSceneUnits: number) {
       // altitudeSceneUnits is altitude * ALTITUDE_SCALE (0.05).
-      // At 0 altitude → scale 1; at ~300 km (15000 units) → scale ~40.
-      // Uses a smooth log ramp so the pullback feels natural.
+      // Gentler log ramp than before (×2.5 instead of ×4).
       const altKm = altitudeSceneUnits * 0.02 // 1 unit = 20m = 0.02 km
-      const scale = 1 + Math.log1p(altKm * 0.5) * 4
+      const scale = (1 + Math.log1p(altKm * 0.5) * 2.5) * userZoom
       chaseOffset.copy(baseChaseOffset).multiplyScalar(scale)
     }
+    // Scroll-wheel zoom: shift the multiplier geometrically so each notch
+    // feels like the same percentage change regardless of current zoom.
+    renderer.domElement.addEventListener('wheel', (e: WheelEvent) => {
+      e.preventDefault()
+      const factor = e.deltaY > 0 ? 1.12 : 1 / 1.12
+      userZoom = Math.max(ZOOM_MIN, Math.min(ZOOM_MAX, userZoom * factor))
+    }, { passive: false })
 
     // ---- Render loop ----
     function animate() {
