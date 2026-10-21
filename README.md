@@ -42,7 +42,10 @@ Physics comes first. The renderer is a view of the telemetry stream; it never fe
 - **Three-actuator flight computer.** Arrow keys command a pitch rate; on release the vehicle holds attitude. Demanded torque is shared between thrust vectoring and movable aerodynamic control fins in proportion to the authority each has at that instant; a finite cold-gas budget covers any remainder.
 - **Recovery.** Drogue then main parachute, attached at the nose, with forces evaluated at the attachment-point velocity (this produces real swing damping). Deployment is gated by dynamic pressure and altitude.
 - **Touchdown classification** by impact speed, tilt and spin rate: `landed` or `crashed`.
-- **3D renderer.** Selectable procedural rocket model pivoted about its centre of gravity, launch complex, plume expansion shader, flame trench flow, heat shimmer, procedural planet with atmosphere rim, starfield, volumetric clouds, bloom, chromatic aberration.
+- **3D renderer.** Selectable procedural rocket model pivoted about its centre of gravity, launch complex, plume expansion shader, flame trench flow, heat shimmer, a true-scale (6,371 km radius) procedural planet with atmosphere rim, starfield, volumetric clouds, bloom, chromatic aberration.
+- **True-scale planet.** The globe is rendered at Earth's real radius, with a logarithmic depth buffer so a 3 m rocket and a 6,371 km planet share one depth range without z-fighting. A dynamic chase camera pulls back with altitude (log-ramped, user-adjustable) so the globe's curvature becomes visible as the vehicle climbs.
+- **Realistic per-vehicle scale.** Each of the four vehicles is scaled to a distinct real-world height (50 to 120 m) instead of sharing one arbitrary size, so they read as different classes of rocket against the true-scale planet.
+- **User zoom control.** The scroll wheel adjusts a zoom multiplier on top of the automatic altitude pullback, so the view can be tightened or widened at any point in flight.
 - **Live instruments** for altitude, velocity, axial g, angle of attack, Mach, dynamic pressure, cold-gas remaining and nozzle deflection.
 - **Telemetry-aware commentary**, spoken with the Web Speech API.
 
@@ -237,16 +240,21 @@ A raw mode (`setAssist(false)`) maps the key directly to gimbal and fin deflecti
 
 The renderer reads the telemetry ref each frame. It contains no physics.
 
-- **Scale.** Altitude and lateral offset are multiplied by `ALTITUDE_SCALE = 0.05`, so one scene unit represents 20 m. The rocket model and launch complex are drawn at a larger, cinematic scale.
+- **Scale.** Altitude and lateral offset are multiplied by `ALTITUDE_SCALE = 0.05`, so one scene unit represents 20 m. The planet, sky dome, starfield and camera far plane are all built at this same true scale (see Planet, below); the launch pad and support structure are drawn at a larger, cinematic scale so they stay legible up close.
+- **Logarithmic depth buffer.** The renderer is created with `logarithmicDepthBuffer: true`. A linear depth buffer cannot represent both a few-metre rocket and a 318,550-unit-radius planet in one range without z-fighting; the log buffer resolves the full span from 0.1 to 800,000 scene units. `CloudPass` decodes depth accordingly (`viewZ = exp2(depth * log2(far + 1)) - 1`) instead of the standard linear formula.
 - **Pose.** The model's origin is at the base of its engine section, but the physics state describes the CG. The CG's world position is `(lateralOffset, altitude + cgHeightAboveBase)` where `cgHeightAboveBase = (1 - centerOfGravity / bodyLength) * modelHeight`. The group is rotated by `-bodyAngle` and its position is solved so the CG lands exactly where the physics puts it, so a flip rotates the model about its CG. A ground clamp prevents any tilted body from sinking below the pad (no effect for an upright rocket).
-- **Camera.** Chase camera at a fixed offset of `(4, 3.5, 16)` from the CG, nearly side-on, looking at the CG, so left and right pitch are mirror images and the vehicle rotates about the centre of the frame.
-- **Rocket models.** Four vehicles are built by `buildVehicle(id, quality, envMap)` in `buildRocket.ts`. Bodies, domes, ogives and engine bells are lathe-revolved profiles; fins are bevelled extrusions; struts are cylinders; rivets are instanced spheres. All static parts are merged into one mesh per material, so a vehicle costs roughly 9 draw calls. A small shader patch adds per-pixel panel seams (an offset brick pattern from a per-vertex panel-coordinate attribute), exhaust soot that streaks up from the engine end, and low-frequency mottling, with no textures. Materials are PBR and use the scene environment map; the high tier adds clearcoat on painted surfaces and rivets. Tone mapping is ACES filmic. The model origin is the base of the engine skirt and the nozzle group pivots at the engine mount, so the gimbal animation is the same for every vehicle.
+- **Camera.** A dynamic chase camera, not a fixed offset. The base offset is `(4, 3.5, 16)` from the CG, nearly side-on, so left and right pitch stay mirror images and the vehicle rotates about the centre of the frame. That offset is scaled by `(1 + log1p(altitudeKm * 0.5) * 2.5) * userZoom`, so the camera pulls back smoothly as altitude climbs and the globe comes into frame, without the jump a linear scale would give. `userZoom` is a multiplier (clamped 0.15 to 6) driven by the mouse wheel: scroll to zoom in or out at any point in flight, on top of the automatic pullback.
+- **Rocket models.** Four vehicles are built by `buildVehicle(id, quality, envMap)` in `buildRocket.ts`. Bodies, domes, ogives and engine bells are lathe-revolved profiles; fins are bevelled extrusions; struts are cylinders; rivets are instanced spheres. All static parts are merged into one mesh per material, so a vehicle costs roughly 9 draw calls. A small shader patch adds per-pixel panel seams (an offset brick pattern from a per-vertex panel-coordinate attribute), exhaust soot that streaks up from the engine end, and low-frequency mottling, with no textures. Materials are PBR and use the scene environment map; the high tier adds clearcoat on painted surfaces and rivets. Tone mapping is ACES filmic. The model origin is the base of the engine skirt and the nozzle group pivots at the engine mount, so the gimbal animation is the same for every vehicle. After building, each model is uniformly scaled so its bounding-box height matches a realistic real-world height for that vehicle class (K-1 Strap 50 m, K-2 Reuse 70 m, K-3 Tower 98 m, K-4 Steel 120 m), converted to scene units at `ALTITUDE_SCALE`; the `height` returned to the scene is measured after scaling, so CG placement and chute position are unaffected.
 - **Quality tiers.** `low`, `medium`, `high` change radial segment counts, clearcoat, soot and mottle detail, rivets and fin bevels. Measured with all four vehicles in one scene: low 36 draw calls / 20k triangles, medium 36 / 33k, high 40 / 82k (only one vehicle is ever shown at a time). While on the pad, if the average frame time exceeds about 33 ms over 90 frames, the scene rebuilds the vehicle one tier lower.
 - **Launch complex.** Textured pad, support legs, flame deflector, hold-down arms, tower, scorch decal. At ignition a dual-sided flame-trench shader fans out horizontally and a ground ignition cloud billows independent of rocket altitude.
 - **Plume.** A shader-deformed cone whose radius follows an expansion factor `1 - exp(-altitude / 8500 m)`: shock-disc structure at sea level, widening to a vacuum cone with altitude. Fresnel rim fade softens the silhouette. Exhaust particles are spawned at the nozzle and travel opposite to the body axis, so they follow the rocket through a flip.
-- **Planet.** A smooth full sphere (radius 420 scene units, 192 x 96 segments) coloured per pixel from five-octave domain-warped 3D noise: deep and shallow ocean, coastal foam, sand, lowland, highland and rock bands. Land is biased around the pad so the launch site is always on land. Because only colour varies, the physics ground (`y = 0`) always matches what is drawn. White clouds fade in from 150 to 1,800 m; a back-faced additive atmosphere shell supplies the blue limb glow, fading in from 500 to 3,500 m (camera is inside the shell near the ground). Ground detail noise at metre scale gives a sense of speed near the surface.
-- **Sky and stars.** Three-stop gradient dome. 2,000 stars fade in between 5 and 15 km.
-- **Volumetric clouds.** Three layers (stratus 0 to 600 m, cumulus 600 m to 2 km, cirrus 6 to 12 km) raymarched against a gradient and cellular noise volume with exponential extinction and height-based colour.
+- **Planet.** True Earth radius: 6,371 km, scaled to 318,550 scene units at `ALTITUDE_SCALE`. Two meshes share one set of noise-based colour uniforms:
+  1. A coarse globe sphere (256 x 128 segments) for the whole planet, visible from orbital altitude and used as the natural horizon — there is no separate horizon mesh.
+  2. A high-resolution near patch: a 160 x 160 flat grid covering a 20 km radius, with each vertex projected onto the sphere surface in the vertex shader, giving metre-scale ground detail close to the pad. It fades out between 8,000 m and 40,000 m altitude as the coarse globe takes over.
+
+  Colour comes from five-octave domain-warped 3D noise evaluated on the sphere normal: deep and shallow ocean, coastal foam, sand, lowland, highland and rock bands. Land is biased around the pad so the launch site is always on land. Because only colour varies and the near patch is projected onto the exact same sphere radius as the globe, the physics ground (`y = 0`) always matches what is drawn. White cloud patches fade in on the globe from 300 to 4,000 m. A back-faced, additive atmosphere shell (80 km thick) supplies the blue limb glow, fading in from 2,000 to 60,000 m — visible as a rim from orbit, invisible from the ground where the camera sits inside the shell.
+- **Sky and stars.** Three-stop gradient dome, radius 600,000 scene units (true-scale sky, matching the camera's 800,000-unit far plane). 2,000 stars on a 500,000-unit shell fade in between 5 and 15 km altitude. There is no scene fog: at true planetary scale, fog would hide the globe entirely, so haze is handled by the atmosphere shell and the cloud layers instead.
+- **Volumetric clouds.** Three layers (stratus 0 to 600 m, cumulus 600 m to 2 km, cirrus 6 to 12 km) raymarched against a gradient and cellular noise volume with exponential extinction and height-based colour, composited against the true opaque depth via the log-depth-aware `CloudPass`.
 - **Post-processing.** Heat scintillation pass masked around the rocket (peaks near 1,200 m, decays with a 8.5 km scale height), bloom, chromatic aberration ramping from 6 to 15 km, output pass.
 
 ---
@@ -346,10 +354,11 @@ Validation performed headlessly against the engine:
 - No structural failure model: loads are reported, but nothing breaks.
 - The wind sign is random per launch, so two otherwise identical launches can drift differently.
 - The Mach-dependent nose slope is held constant; only the fins carry the compressibility correction.
-- Vehicle models are cosmetic: they do not change mass properties, aerodynamics or propulsion, and the drag, fin and centre-of-gravity geometry is still derived from the reference area. The fin planform in the physics does not match each model's drawn fins.
+- Vehicle models are cosmetic: they do not change mass properties, aerodynamics or propulsion, and the drag, fin and centre-of-gravity geometry is still derived from the reference area. The fin planform in the physics does not match each model's drawn fins. Each model's real-world height (used for render scale) is likewise independent of the physics geometry derived from the reference area.
 - Gesture thresholds are tuned on synthetic landmark data only and need calibration on real cameras; swipe direction depends on the camera not being mirrored in the raw feed.
 - The control fins are modelled in the physics and reported in telemetry (`finAngle`) but are not yet animated on the 3D model.
-- Scene scale is compressed (`ALTITUDE_SCALE = 0.05`) for readability; the planet curvature is deliberately exaggerated relative to a true-scale Earth.
+- Left/right arrow input commands a pitch *rate*, not lateral translation. Because the attitude-hold loop re-centres pitch quickly and lateral drift is a second-order, lagged consequence of thrust/drag tilt (not a direct force), a short tap reads mostly as the nose tipping rather than as sideways motion — the vehicle does genuinely drift sideways once the tilt has had time to act on its mass, matching real gravity-turn behaviour, but it is not an arcade-style strafe.
+- The flight model is planar (pitch only, no yaw or roll) with flat-Earth gravity; the rendered planet is true-scale and curved, but the physics ground is still a flat plane at `y = 0` and gravity points straight down rather than toward a planet centre. Spherical gravity, Earth rotation and full 6-DOF are planned (see Sponsorship).
 
 ---
 
@@ -394,13 +403,11 @@ src/
 ├── physics/
 │   └── rocketPhysics.ts        # Flight model: atmosphere, wind, aero, propulsion, mass, flight computer, recovery
 ├── render/
-│   ├── Scene.tsx               # Scene, shaders, post-processing, pose and camera
-│   ├── buildRocket.ts          # Procedural vehicle kit: four vehicles, quality tiers, panel/soot shader
-│   ├── buildGround.ts          # Procedural planet and atmosphere rim
-│   ├── buildHorizon.ts         # Horizon backdrop
-│   ├── buildSun.ts             # Sun disc matched to the scene light
-│   ├── CloudLayer.ts           # Volumetric cloud class (stratus, cumulus, cirrus)
-│   └── noise.ts                # CPU gradient / cellular / fractal noise (GLSL port in CloudLayer)
+│   ├── Scene.tsx               # Scene, shaders, post-processing, pose, dynamic chase camera, zoom
+│   ├── buildRocket.ts          # Procedural vehicle kit: four vehicles at realistic scale, quality tiers, panel/soot shader
+│   ├── buildGround.ts          # True-scale planet (globe + near patch), atmosphere rim
+│   ├── buildSun.ts             # Sun disc matched to the scene light, scaled for true-scale sky
+│   └── CloudPass.ts            # Volumetric cloud post-process pass (stratus, cumulus, cirrus), log-depth aware
 ├── commentary/
 │   ├── commentaryEngine.ts     # Stage-transition and event trigger logic
 │   └── lines.ts                # Line bank: telemetry-aware templates for all triggers
@@ -449,6 +456,7 @@ Kalam is an independent, open-source project. It is built and maintained in spar
 
 ### What sponsorship funds
 
+- **Spherical gravity and 6-DOF.** Replacing flat-Earth gravity with `mu/r^2` toward a true planet centre, adding yaw and roll so the rendered true-scale globe and the physics finally agree, plus Earth rotation and real downrange/orbital tracking.
 - **Vehicle-specific physics.** Per-vehicle mass properties, staging, boosters, engine clusters and throttle profiles, so the four models stop being cosmetic.
 - **Structural failure model.** Load limits, breakup and debris, so a 21 g flip actually costs you the vehicle.
 - **Higher-fidelity rendering.** Cloud and plume improvements, an opt-in path-traced preview, per-vehicle launch pads, and control fins that move on the model.
