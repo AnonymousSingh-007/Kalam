@@ -5,7 +5,7 @@ import { RenderPass } from 'three/examples/jsm/postprocessing/RenderPass.js'
 import { UnrealBloomPass } from 'three/examples/jsm/postprocessing/UnrealBloomPass.js'
 import { OutputPass } from 'three/examples/jsm/postprocessing/OutputPass.js'
 import { ShaderPass } from 'three/examples/jsm/postprocessing/ShaderPass.js'
-import { CloudLayer } from './CloudLayer'
+import { CloudPass } from './CloudPass'
 import { buildVehicle, type VehicleModel } from './buildRocket'
 import { buildGround, type GroundResult } from './buildGround'
 import { buildHorizon } from './buildHorizon'
@@ -225,9 +225,7 @@ export function Scene({ telemetryRef, launched, vehicleId, selecting, quality = 
   const trenchCloudVel = useRef<Float32Array | null>(null)
   const trenchCloudAge = useRef<Float32Array | null>(null)
   const heatStrengthRef = useRef<{ value: number } | null>(null)
-  const cumulusLayerRef = useRef<CloudLayer | null>(null)
-  const stratusLayerRef = useRef<CloudLayer | null>(null)
-  const cirrusLayerRef = useRef<CloudLayer | null>(null)
+  const cloudPassRef = useRef<CloudPass | null>(null)
   const groundResultRef = useRef<GroundResult | null>(null)
   const starMatRef = useRef<THREE.PointsMaterial | null>(null)
   const chuteRef = useRef<THREE.Mesh | null>(null)
@@ -335,13 +333,6 @@ export function Scene({ telemetryRef, launched, vehicleId, selecting, quality = 
     buildSun(scene, sun.position, sun.color)
 
     // ---- Cloud layers ----
-    cumulusLayerRef.current = new CloudLayer(scene, 'cumulus', 30, 100, 0.65, qualityRef.current)
-    stratusLayerRef.current = new CloudLayer(scene, 'stratus', 0, 30, 0.4, qualityRef.current)
-    cirrusLayerRef.current  = new CloudLayer(scene, 'cirrus', 300, 600, 0.5, qualityRef.current)
-    for (const layer of [cumulusLayerRef.current, stratusLayerRef.current, cirrusLayerRef.current]) {
-      layer.setSun(sun.position, sun.color)
-    }
-    const cloudLayers = () => [cumulusLayerRef.current, stratusLayerRef.current, cirrusLayerRef.current]
 
     // ---- Ground ----
     const groundResult = buildGround()
@@ -605,10 +596,24 @@ export function Scene({ telemetryRef, launched, vehicleId, selecting, quality = 
     scene.add(groundCloud); groundCloudRef.current = groundCloud
 
     // ---- Post-processing ----
-    const composer = new EffectComposer(renderer)
+    // The scene is rendered into a target that keeps a depth texture, which
+    // the cloud pass reads so clouds composite against the real opaque depth.
+    const pr = Math.min(window.devicePixelRatio, 2)
+    const sceneTarget = new THREE.WebGLRenderTarget(width * pr, height * pr, {
+      type: THREE.HalfFloatType,
+      depthTexture: new THREE.DepthTexture(width * pr, height * pr, THREE.UnsignedIntType)
+    })
+    const composer = new EffectComposer(renderer, sceneTarget)
     composer.setSize(width, height)
-    composer.setPixelRatio(Math.min(window.devicePixelRatio, 2))
+    composer.setPixelRatio(pr)
+    // The composer clones the target for its second buffer; give the clone its
+    // own depth texture so the cloud pass never samples the depth it writes to.
+    composer.renderTarget2.depthTexture = new THREE.DepthTexture(width * pr, height * pr, THREE.UnsignedIntType)
     composer.addPass(new RenderPass(scene, camera))
+    const cloudPass = new CloudPass(camera, scene, qualityRef.current)
+    cloudPass.setSun(sun.position, sun.color)
+    composer.addPass(cloudPass)
+    cloudPassRef.current = cloudPass
 
     const heatUniforms = {
       tDiffuse:        { value: null as THREE.Texture | null },
@@ -641,8 +646,6 @@ export function Scene({ telemetryRef, launched, vehicleId, selecting, quality = 
     composer.addPass(new OutputPass())
 
     const rocketWorldPos = new THREE.Vector3()
-    const cloudOccluderPos = new THREE.Vector3()
-    const cloudOccluderTop = new THREE.Vector3()
 
     // ---- Fixed-offset chase camera ----
     // Equidistant from the rocket at all times — the offset vector is
@@ -666,6 +669,7 @@ export function Scene({ telemetryRef, launched, vehicleId, selecting, quality = 
       const tLeftMat = trenchLeftMatRef.current
       const tRightMat = trenchRightMatRef.current
       const elapsed = clockRef.current.getElapsedTime()
+      cloudPassRef.current?.setTime(elapsed)
 
       const nowT = performance.now()
       const frameMs = nowT - lastFrameT
@@ -682,7 +686,7 @@ export function Scene({ telemetryRef, launched, vehicleId, selecting, quality = 
           if (next) {
             qualityRef.current = next
             swapVehicle(vehicleRef.current, next)
-            for (const l of cloudLayers()) l?.setQuality(next)
+            cloudPassRef.current?.setQuality(next)
           }
         }
       }
@@ -751,16 +755,6 @@ export function Scene({ telemetryRef, launched, vehicleId, selecting, quality = 
         )
         camera.lookAt(cgX, cgY, r.position.z)
 
-        cloudOccluderPos.set(r.position.x, r.position.y, r.position.z)
-        cloudOccluderTop.set(
-          r.position.x - Math.sin(phi) * rocketHeight,
-          r.position.y + Math.cos(phi) * rocketHeight,
-          r.position.z
-        )
-        for (const l of cloudLayers()) l?.setOccluder(cloudOccluderPos, cloudOccluderTop, rocketRadius * 0.75)
-        cumulusLayerRef.current?.update(elapsed, camera.position)
-        stratusLayerRef.current?.update(elapsed, camera.position)
-        cirrusLayerRef.current?.update(elapsed, camera.position)
         groundResultRef.current?.update(telemetry.altitude)
 
         const isThrusting = telemetry.stage === 'powered-ascent'
@@ -939,9 +933,7 @@ export function Scene({ telemetryRef, launched, vehicleId, selecting, quality = 
     return () => {
       cancelAnimationFrame(rafRef.current)
       if (resizeObserver) { resizeObserver.disconnect() } else { window.removeEventListener('resize', handleResize) }
-      cumulusLayerRef.current?.dispose()
-      stratusLayerRef.current?.dispose()
-      cirrusLayerRef.current?.dispose()
+      cloudPassRef.current?.dispose()
       groundResultRef.current?.dispose()
       heatPass.dispose()
       chromaPass.dispose()
@@ -956,9 +948,7 @@ export function Scene({ telemetryRef, launched, vehicleId, selecting, quality = 
 
   useEffect(() => {
     qualityRef.current = quality
-    cumulusLayerRef.current?.setQuality(quality)
-    stratusLayerRef.current?.setQuality(quality)
-    cirrusLayerRef.current?.setQuality(quality)
+    cloudPassRef.current?.setQuality(quality)
     if (!launchedRef.current) swapRef.current?.(vehicleRef.current, quality)
   }, [quality])
 
