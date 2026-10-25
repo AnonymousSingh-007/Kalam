@@ -52,6 +52,40 @@ export const COMMENTARY_LINES: CommentaryLine[] = [
     text: (d) => `${d.axialGLoad.toFixed(1)}g at ignition. The rocket is not subtle about this.`
   },
 
+  // ---- ascent (continuous, fires every few seconds through the burn) ----
+  { trigger: 'ascent', text: "Still climbing. The exhaust trail is doing most of the storytelling here." },
+  { trigger: 'ascent', text: "Engine's still lit. So far, so expected." },
+  { trigger: 'ascent', text: "Throttle up, ego up. Powered ascent continues." },
+  { trigger: 'ascent', text: "No drama yet. Don't get comfortable." },
+  { trigger: 'ascent', text: "Burning fuel at a rate that would make an accountant weep." },
+  { trigger: 'ascent', text: "The pad is a distant memory now. Good riddance." },
+  { trigger: 'ascent', text: "Thrust nominal. Everything is going suspiciously well." },
+  { trigger: 'ascent', text: "Still under power. The sky is getting less sky-colored." },
+  {
+    trigger: 'ascent',
+    text: (d) => `${d.altitude.toFixed(0)} metres and climbing. Nothing's on fire that shouldn't be.`
+  },
+  {
+    trigger: 'ascent',
+    text: (d) => `${d.velocity.toFixed(0)} metres per second, straight up. Respectable.`
+  },
+  {
+    trigger: 'ascent',
+    text: (d) => `${d.axialGLoad.toFixed(1)}g right now. Comfortable, as rocket flight goes.`,
+    guard: (d) => d.axialGLoad <= 7
+  },
+  {
+    trigger: 'ascent',
+    text: (d) => `Angle of attack sitting at ${d.angleOfAttack.toFixed(1)} degrees. Nothing to report.`,
+    guard: (d) => d.angleOfAttack < 10
+  },
+  {
+    trigger: 'ascent',
+    text: (d) => `${d.altitude.toFixed(0)}m up, ${d.velocity.toFixed(0)}m/s and rising. The rocket is, for once, behaving.`
+  },
+  { trigger: 'ascent', text: "Still powered. Still pointed roughly the right way. We'll take it." },
+  { trigger: 'ascent', text: "Climbing hard. The ground has officially stopped being relevant." },
+
   // ---- max-q ----
   { trigger: 'max-q', text: "Max aerodynamic pressure. The rocket is currently having a bad time." },
   { trigger: 'max-q', text: "This is statistically the most likely moment for things to go wrong. Cool, cool." },
@@ -187,8 +221,9 @@ export function getLine(trigger: CommentaryTrigger, data: CommentaryData, exclud
     return !exclude.has(text)
   })
   if (options.length === 0) {
-    // All lines excluded — reset and try again without exclusions
-    const fallback = COMMENTARY_LINES.filter((l) => l.trigger === trigger)
+    // All lines excluded (or guarded out) — fall back to any line for this
+    // trigger that still passes its guard, ignoring the exclusion set.
+    const fallback = COMMENTARY_LINES.filter((l) => l.trigger === trigger && (!l.guard || l.guard(data)))
     if (fallback.length === 0) return ''
     const picked = fallback[Math.floor(Math.random() * fallback.length)]
     return typeof picked.text === 'function' ? picked.text(data) : picked.text
