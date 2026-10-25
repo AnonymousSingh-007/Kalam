@@ -1,7 +1,8 @@
 import type { Telemetry, CommentaryTrigger } from '../types'
 import { getLine, type CommentaryData } from './lines'
 
-const PERIODIC_INTERVAL = 8       // seconds between periodic coast/descent lines
+const PERIODIC_INTERVAL = 8        // seconds between periodic coast/descent lines
+const ASCENT_PERIODIC_INTERVAL = 4 // seconds between periodic powered-ascent lines (burns are short, keep it livelier)
 const HIGH_G_THRESHOLD = 7        // axial g-load above this fires high-g event
 const HIGH_AOA_THRESHOLD = 15     // degrees above this fires high-aoa event
 const FAST_DESCENT_THRESHOLD = 80 // m/s downward above this fires fast-descent event
@@ -93,8 +94,16 @@ export class CommentaryEngine {
       }
     }
 
-    // ---- Periodic lines during long quiet phases ----
-    if (
+    // ---- Periodic lines during long quiet phases, AND through the burn ----
+    // Powered ascent gets its own shorter interval and trigger bank so the
+    // commentary stays continuous from ignition through burnout, not just
+    // on the way down.
+    if (!line && telemetry.stage === 'powered-ascent') {
+      if (telemetry.time - this.lastPeriodicTime >= ASCENT_PERIODIC_INTERVAL) {
+        line = this.fire('ascent', data)
+        this.lastPeriodicTime = telemetry.time
+      }
+    } else if (
       !line &&
       (telemetry.stage === 'coast' || telemetry.stage === 'descent') &&
       telemetry.time - this.lastPeriodicTime >= PERIODIC_INTERVAL
