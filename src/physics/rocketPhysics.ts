@@ -38,6 +38,14 @@
  * applied at station x (measured from the nose, aft positive):
  *     tau = -(x - x_cg) * (F . n)
  * Positive telemetry gimbalAngle = nozzle swung right = nose torque to the right.
+ *
+ * GRAVITY is a true inverse-square vector toward a planet centre sitting
+ * directly below the pad at (0, -R_EARTH), not a flat downward scalar. Its
+ * magnitude still follows g = g0 * (R_earth / r)^2 (r = distance from the
+ * centre), but now its direction also tilts very slightly toward that
+ * centre as the vehicle moves downrange (x != 0), instead of always
+ * pointing along -Y. The model stays planar (pitch only, no yaw/roll/Earth
+ * rotation) -- this only fixes gravity's direction within that plane.
  */
 
 import type { RocketParams, Telemetry, FlightStage } from '../types'
@@ -67,6 +75,23 @@ const round = (v: number, d = 2) => {
   const k = 10 ** d
   const r = Math.round(v * k) / k
   return r === 0 ? 0 : r
+}
+
+// ═══════════════════════════ spherical gravity ═══════════════════════════
+// The planet centre sits directly below the pad: (0, -R_EARTH) in the
+// planar (x, y) frame. Gravity points from the vehicle's position toward
+// that centre, magnitude g0 * (R_earth / r)^2, so it tilts away from a pure
+// -Y direction as the vehicle moves downrange (x != 0) -- exactly like a
+// real rocket's local "down" rotating relative to the launch pad's "down".
+const PLANET_CENTER_X = 0
+const PLANET_CENTER_Y = -R_EARTH
+
+function gravityVector(x: number, y: number): { gx: number; gy: number; g: number; r: number } {
+  const dx = x - PLANET_CENTER_X
+  const dy = y - PLANET_CENTER_Y
+  const r = Math.max(Math.hypot(dx, dy), 1)
+  const g = G0 * (R_EARTH / r) ** 2
+  return { gx: (-g * dx) / r, gy: (-g * dy) / r, g, r }
 }
 
 // ═══════════════════════════ ISA 1976 ═══════════════════════════
@@ -521,7 +546,7 @@ export class RocketPhysicsEngine {
 
   private deriv(s: Vec6, c: Ctx): { d: Vec6; dg: Diag } {
     const g = this.geom
-    const y = s[1], vx = s[2], vy = s[3], th = s[4], om = s[5]
+    const x = s[0], y = s[1], vx = s[2], vy = s[3], th = s[4], om = s[5]
 
     const atm = isa1976(y)
     const windX = this.windProfile(y) + c.gust
@@ -589,10 +614,9 @@ export class RocketPhysicsEngine {
     const ngx = Fa * bx + (Fn + Fc) * nx + tx + cx
     const ngy = Fa * by + (Fn + Fc) * ny + ty + cy
 
-    const rr = R_EARTH / (R_EARTH + y)
-    const grav = G0 * rr * rr
-    const ax = ngx / c.m
-    const ay = ngy / c.m - grav
+    const { gx, gy } = gravityVector(x, y)
+    const ax = ngx / c.m + gx
+    const ay = ngy / c.m + gy
 
     const tauPassive = tauAero + tauDamp + tauJet + tauChute
     const tau = tauPassive + tauThrust + tauFin + c.tauRcs
@@ -872,8 +896,7 @@ export class RocketPhysicsEngine {
     const cnaN = CNA_NOSE
     const cnaF = g.cnaFin * finMachFactor(d.mach)
     const xcp = (cnaN * g.xNose + cnaF * g.xFin) / (cnaN + cnaF)
-    const rr = R_EARTH / (R_EARTH + s[1])
-    const grav = G0 * rr * rr
+    const { g: grav } = gravityVector(s[0], s[1])
     const speed = Math.hypot(s[2], s[3])
     const fpa = speed > 0.5 ? Math.atan2(s[2], s[3]) * DEG : 0
 
