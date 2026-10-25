@@ -121,6 +121,7 @@ export type CommentaryTrigger =
   | 'countdown'
   | 'pre-launch'
   | 'ignition'
+  | 'ascent'
   | 'max-q'
   | 'burnout'
   | 'coast'
