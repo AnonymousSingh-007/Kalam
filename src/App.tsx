@@ -4,6 +4,7 @@ import { countFingers } from './hand/fingerCount'
 import { CountdownMachine } from './state/countdownMachine'
 import { RocketPhysicsEngine, EMPTY_TELEMETRY } from './physics/rocketPhysics'
 import { telemetryLogger } from './physics/telemetryLogger'
+import { checkFlightSanity } from './physics/flightSanity'
 import { CommentaryEngine } from './commentary/commentaryEngine'
 import { ParamPanel } from './ui/ParamPanel'
 import { InstrumentPanel } from './ui/InstrumentPanel'
@@ -187,6 +188,17 @@ function App() {
 
   function handleLaunch(params: RocketParams) {
     if (state.phase !== 'armed') return
+
+    const sanity = checkFlightSanity(params)
+    if (!sanity.ok) {
+      const proceed = window.confirm(
+        `Heads up — these parameters are outside what the simulator is tuned for:\n\n` +
+        sanity.warnings.join('\n') +
+        `\n\nYou can still launch, but the flight may tumble or show runaway numbers. Launch anyway?`
+      )
+      if (!proceed) return
+    }
+
     const engine = new RocketPhysicsEngine(params)
     engine.launch()
     engineRef.current = engine
@@ -269,6 +281,13 @@ function App() {
               <div>{status}</div>
               <div>{JSON.stringify(state)}</div>
               <div>{debug}</div>
+              {/* DEV ONLY — grants write access to the project's logs/ folder
+                  so flight telemetry writes straight to logs/current-flight.log
+                  instead of downloading. Remove before deploying; see
+                  telemetryLogger.ts for why this exists. */}
+              <button onClick={() => void telemetryLogger.chooseLogFolder()}>
+                Choose logs/ folder for telemetry
+              </button>
             </div>
           )}
         </aside>
