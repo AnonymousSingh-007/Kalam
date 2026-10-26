@@ -285,7 +285,10 @@ function App() {
                   so flight telemetry writes straight to logs/current-flight.log
                   instead of downloading. Remove before deploying; see
                   telemetryLogger.ts for why this exists. */}
-              <button onClick={() => void telemetryLogger.chooseLogFolder()}>
+              <button
+                type="button"
+                onClick={() => void telemetryLogger.chooseLogFolder()}
+              >
                 Choose logs/ folder for telemetry
               </button>
             </div>
