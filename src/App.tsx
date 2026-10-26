@@ -3,6 +3,7 @@ import { HandTracker } from './hand/handTracker'
 import { countFingers } from './hand/fingerCount'
 import { CountdownMachine } from './state/countdownMachine'
 import { RocketPhysicsEngine, EMPTY_TELEMETRY } from './physics/rocketPhysics'
+import { telemetryLogger } from './physics/telemetryLogger'
 import { CommentaryEngine } from './commentary/commentaryEngine'
 import { ParamPanel } from './ui/ParamPanel'
 import { InstrumentPanel } from './ui/InstrumentPanel'
@@ -139,6 +140,9 @@ function App() {
 
         const t = telemetryRef.current
         if (t) {
+          telemetryLogger.record(t)
+          telemetryLogger.flushIfDone(t)
+
           const line = commentaryEngineRef.current.tick(t, t.airDensity)
           if (line) setCommentary(line)
 
@@ -187,6 +191,10 @@ function App() {
     engine.launch()
     engineRef.current = engine
     lastTimeRef.current = 0
+    telemetryLogger.startSession({
+      vehicleId: VEHICLES[vehicleIndex]?.id,
+      params: params as unknown as Record<string, number>,
+    })
     machine.launch()
     setLaunched(true)
     commentaryEngineRef.current.reset()
