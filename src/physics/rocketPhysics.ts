@@ -851,7 +851,7 @@ export class RocketPhysicsEngine {
     }
     const pre = this.deriv(s, preCtx)
     let rcsUsed = 0
-    this.controlStep(s, pre.dg.tauPassivePitch, pre.dg.tauPassiveYaw, mp0, T, h, chuteCdS > 0, (u) => (rcsUsed = u))
+    this.controlStep(s, pre.dg.tauPassivePitch, pre.dg.tauPassiveYaw, pre.dg.q, pre.dg.mach, mp0, T, h, chuteCdS > 0, (u) => (rcsUsed = u))
 
     const gasEnd = Math.max(this.rcsGas - rcsUsed, 0)
     const mp1 = this.massProps(propEnd, gasEnd)
@@ -914,7 +914,8 @@ export class RocketPhysicsEngine {
   // ───────────────────────── flight computer ─────────────────────────
 
   private controlStep(
-    s: State13, tauPassivePitch: number, tauPassiveYaw: number, mp: MassProps, T: number, h: number,
+    s: State13, tauPassivePitch: number, tauPassiveYaw: number, qDyn: number, mach: number,
+    mp: MassProps, T: number, h: number,
     chuteOut: boolean, setRcsUsed: (u: number) => void,
   ): void {
     const g = this.geom
@@ -980,7 +981,7 @@ export class RocketPhysicsEngine {
         const tvcAuth = T > 1 && arm > 0.05 ? T * arm * sinMax : 0
         const finLever = Math.max(g.xFin - mp.xcg, 0)
         const finGain =
-          this.diag.q * g.Aref * g.cnaFin * finMachFactor(this.diag.mach) * FIN_CTRL_EFF * finLever
+          qDyn * g.Aref * g.cnaFin * finMachFactor(mach) * FIN_CTRL_EFF * finLever
         const finAuth = finGain * FIN_CTRL_MAX
         const authSum = tvcAuth + finAuth
 
