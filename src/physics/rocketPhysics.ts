@@ -1,54 +1,77 @@
 /**
- * rocketPhysics.ts — planar (3-DOF) rigid-body rocket flight simulator.
+ * rocketPhysics.ts — full 6-DOF rigid-body rocket flight simulator.
  *
- * State: x, y, vx, vy, theta (pitch), omega (pitch rate). RK4 at <=200 Hz.
+ * State (13 scalars): px,py,pz (position) | vx,vy,vz (velocity) |
+ * qx,qy,qz,qw (orientation quaternion, body->local) | wx,wy,wz (body-frame
+ * angular velocity). RK4 at <=200 Hz, quaternion renormalized every step.
  *
- *  ATMOSPHERE   ISA 1976, 7 layers, exact base pressures chained from sea
- *               level, density from the ideal-gas law, geopotential altitude
- *               (r0 = 6,356,766 m), isothermal exponential tail above 84.85 km.
- *  WIND         altitude profile (jet-stream peak near 11 km) + Ornstein-
- *               Uhlenbeck gusts. Aerodynamics use AIR-RELATIVE velocity.
- *  GEOMETRY     derived from the launch params: reference area -> diameter,
- *               fineness ratio 12, 4 swept fins, ogive nose.
- *  AERO         axial force (Mach-dependent Cd, separate tail-first Cd),
- *               normal force over the FULL angle-of-attack range 0..180 deg
- *               (potential-flow term sin(a)|cos(a)| for nose + fins, cross-flow
- *               term sin(a)|sin(a)|), Barrowman CN_alpha and CP, Mach-corrected
- *               fin effectiveness, pitch damping from the same station sums.
- *               Tail-first flight is naturally unstable; no clamps anywhere.
- *  PROPULSION   F = f*F_vac - p_ambient*A_exit, mdot = f*mdot0 (burn rate from
- *               the params), ignition ramp, tail-off, jet damping.
- *  MASS         structure + propellant + RCS gas, CG and pitch inertia from
- *               the parallel-axis theorem, dI/dt term in the rotational eqn.
- *  CONTROL      rate-command attitude hold (flight computer): arrow keys
- *               command a pitch rate; on release it holds attitude. Torque is
- *               allocated across TVC (+-6 deg) and movable aerodynamic
- *               control fins (+-15 deg, authority ~ dynamic pressure), shared
- *               in proportion to available authority; RCS cold gas (finite
- *               budget) mops up whatever is left. All actuators are rate and
- *               lag limited.
- *  RECOVERY     drogue then main chute attached at the nose, forces evaluated
- *               at the attachment point velocity (gives real damping).
- *  GROUND       launch rail, hold-down, soft landing vs crash from impact
- *               speed / tilt / spin.
+ *  FRAME        local launch-site tangent frame, inertial, origin at the pad.
+ *               +Y = up, +Z = north, +X = east. NOT rotating (no Coriolis,
+ *               no Earth-rotation boost — see 6dof-spec.md "Deferred").
+ *  BODY AXES    +Y_body = nose-first (thrust/symmetry axis), +X_body =
+ *               pitch-plane normal (today's old "n"), +Z_body = yaw-plane
+ *               normal (new). Gimbal/fin pitch acts in the X_body-Y_body
+ *               plane; gimbal/fin yaw acts in the Y_body-Z_body plane.
+ *  ATMOSPHERE   ISA 1976, unchanged from the planar model.
+ *  WIND         altitude profile + Ornstein-Uhlenbeck gusts, applied along
+ *               local +X only (unchanged) — aerodynamics use air-relative
+ *               velocity in 3D.
+ *  GRAVITY      true inverse-square vector toward a planet centre sitting
+ *               directly below the pad at local (0, -R_EARTH, 0); resolves
+ *               in all 3 dimensions now, not just the old X-Y plane.
+ *  INERTIA      diagonal body-frame tensor I = diag(Ixx, Iyy, Izz).
+ *               Ixx = Izz = the old scalar pitch inertia (axisymmetric
+ *               rocket, pitch plane == yaw plane by symmetry). Iyy (roll,
+ *               along the long axis) is a separate, much smaller term from
+ *               each mass lump's own radius. Euler's equation carries the
+ *               new ω×(I·ω) gyroscopic coupling term, zero in the old
+ *               planar model and non-zero whenever roll and pitch/yaw
+ *               coexist.
+ *  AERO         same tables (Cd(mach), CN, Barrowman CP) as the planar
+ *               model, now evaluated at a true 3D angle of attack and
+ *               resolved into independent pitch-plane and yaw-plane
+ *               components. No passive aerodynamic roll torque (flagged
+ *               Phase-1 simplification — real for a lumped-CN fin model).
+ *  PROPULSION   unchanged scalar thrust model; thrust DIRECTION is now the
+ *               body +Y axis rotated by (gimbalPitch, gimbalYaw) before
+ *               being rotated into the local frame by the body quaternion.
+ *  CONTROL      rate-command attitude hold, independently on each of
+ *               pitch/yaw/roll. Pitch/yaw torque is allocated across TVC
+ *               and movable aero fins exactly as before (now per-axis);
+ *               roll has no TVC or fin authority (single-engine vehicle)
+ *               and is RCS-only. RCS is a 3-axis torque vector sharing one
+ *               finite cold-gas budget. Arrow-key UI input stays pitch-only
+ *               (setYawInput/setRollInput are new API surface for later UI
+ *               work).
+ *  RECOVERY     drogue/main chute at the nose, forces evaluated at the
+ *               attachment point's 3D velocity.
+ *  GROUND       launch rail, hold-down, soft landing vs crash — now checks
+ *               tilt/spin magnitude across all three rotational axes.
  *
- * Conventions: +Y up, +X right. theta = pitch from vertical, CLOCKWISE
- * positive (right = positive). Body axis b = (sin t, cos t), normal
- * n = (cos t, -sin t). Torque about the CG, clockwise-positive, of a force F
- * applied at station x (measured from the nose, aft positive):
- *     tau = -(x - x_cg) * (F . n)
- * Positive telemetry gimbalAngle = nozzle swung right = nose torque to the right.
+ * Collapse guarantee: with zero yaw/roll input and zero initial roll, this
+ * engine's px,py,vx,vy and the pitch component of orientation/rate must
+ * match the old 3-DOF engine's x,y,vx,vy,theta,omega exactly (6dof-spec.md
+ * §9, acceptance test 1). See the sign-convention notes below.
  *
- * GRAVITY is a true inverse-square vector toward a planet centre sitting
- * directly below the pad at (0, -R_EARTH), not a flat downward scalar. Its
- * magnitude still follows g = g0 * (R_earth / r)^2 (r = distance from the
- * centre), but now its direction also tilts very slightly toward that
- * centre as the vehicle moves downrange (x != 0), instead of always
- * pointing along -Y. The model stays planar (pitch only, no yaw/roll/Earth
- * rotation) -- this only fixes gravity's direction within that plane.
+ * Sign conventions (standard right-hand 3D, NOT the old clockwise-positive
+ * 2D convention):
+ *   - Positive wz (body) = CCW about +Z_body = nose tilts toward -X (left in
+ *     the old 2D telemetry sense). The old engine's omega was clockwise-
+ *     positive (nose-right positive), so wz = -omega_old, and torque about
+ *     Z_body maps as tau_z = -tau_old.
+ *   - bodyAngle telemetry (kept "nose-right positive" for compatibility)
+ *     is computed as atan2(bodyDir.x, bodyDir.y) where bodyDir is the body
+ *     +Y axis expressed in the local frame — this matches the old
+ *     atan2-based sign exactly when yaw/roll are zero.
+ *   - Positive wy (roll rate) = CCW about +Y_body looking from the tail
+ *     toward the nose (down the thrust axis).
  */
 
 import type { RocketParams, Telemetry, FlightStage } from '../types'
+import * as V3 from './vec3'
+import * as Q from './quat'
+import type { Vec3 } from './vec3'
+import type { Quat } from './quat'
 
 // ═══════════════════════════ constants ═══════════════════════════
 
@@ -77,21 +100,19 @@ const round = (v: number, d = 2) => {
   return r === 0 ? 0 : r
 }
 
-// ═══════════════════════════ spherical gravity ═══════════════════════════
-// The planet centre sits directly below the pad: (0, -R_EARTH) in the
-// planar (x, y) frame. Gravity points from the vehicle's position toward
-// that centre, magnitude g0 * (R_earth / r)^2, so it tilts away from a pure
-// -Y direction as the vehicle moves downrange (x != 0) -- exactly like a
-// real rocket's local "down" rotating relative to the launch pad's "down".
-const PLANET_CENTER_X = 0
-const PLANET_CENTER_Y = -R_EARTH
+// ═══════════════════════════ spherical gravity (3D) ═══════════════════════════
+// The planet centre sits directly below the pad in the local frame. Gravity
+// points from the vehicle's position toward that centre, magnitude
+// g0 * (R_earth / r)^2 — now resolves properly in X, Y, AND Z, so
+// out-of-plane (Z) drift also tilts gravity toward the true centre, same as
+// the existing X-direction fix.
+const PLANET_CENTER: Vec3 = [0, -R_EARTH, 0]
 
-function gravityVector(x: number, y: number): { gx: number; gy: number; g: number; r: number } {
-  const dx = x - PLANET_CENTER_X
-  const dy = y - PLANET_CENTER_Y
-  const r = Math.max(Math.hypot(dx, dy), 1)
-  const g = G0 * (R_EARTH / r) ** 2
-  return { gx: (-g * dx) / r, gy: (-g * dy) / r, g, r }
+function gravityVector3(p: Vec3): { g: Vec3; mag: number; r: number } {
+  const d = V3.sub(p, PLANET_CENTER)
+  const r = Math.max(V3.length(d), 1)
+  const mag = G0 * (R_EARTH / r) ** 2
+  return { g: V3.scale(d, -mag / r), mag, r }
 }
 
 // ═══════════════════════════ ISA 1976 ═══════════════════════════
@@ -245,7 +266,8 @@ function buildGeometry(p: RocketParams): Geometry {
 interface MassProps {
   m: number
   xcg: number
-  I: number
+  I: number       // Ixx = Izz (pitch/yaw inertia, axisymmetric)
+  Iyy: number      // roll inertia, about the body long axis
 }
 
 // ═══════════════════════════ control / actuator constants ═══════════════════════════
@@ -253,10 +275,10 @@ interface MassProps {
 const GIMBAL_MAX = 6 * RAD
 const GIMBAL_RATE = 25 * RAD
 const GIMBAL_TAU = 0.05
-const OMEGA_MAX = 30 * RAD           // commanded pitch rate at full key deflection
+const OMEGA_MAX = 30 * RAD           // commanded rate at full key deflection, per axis
 const K_THETA = 1.8                  // attitude-hold outer loop (1/s)
 const K_OMEGA = 6.0                  // rate inner loop (1/s)
-const RCS_ACCEL = 30 * RAD           // RCS angular-acceleration authority
+const RCS_ACCEL = 30 * RAD           // RCS angular-acceleration authority, per axis
 const RCS_DEADBAND = 0.04
 // Movable aerodynamic control fins (grid-fin / all-moving-fin class). Their
 // authority scales with dynamic pressure, so they take over from TVC exactly
@@ -307,19 +329,35 @@ function mulberry32(seed: number) {
 
 // ═══════════════════════════ types ═══════════════════════════
 
-type Vec6 = [number, number, number, number, number, number]
+// 13-scalar flat state, matching 6dof-spec.md §2 exactly:
+//  0: px  1: py  2: pz        position, local frame, metres
+//  3: vx  4: vy  5: vz        velocity, local frame
+//  6: qx  7: qy  8: qz  9: qw  orientation quaternion, body -> local
+// 10: wx 11: wy 12: wz        angular velocity, BODY frame, rad/s
+type State13 = [
+  number, number, number,
+  number, number, number,
+  number, number, number, number,
+  number, number, number,
+]
+
+const STATE_LEN = 13
 
 interface Ctx {
   m: number
   xcg: number
-  I: number
-  Idot: number
+  Ixx: number       // = Izz, pitch/yaw
+  Iyy: number       // roll
+  IxxDot: number
+  IyyDot: number
   T: number
-  gimbal: number
-  fin: number
+  gimbalPitch: number
+  gimbalYaw: number
+  finPitch: number
+  finYaw: number
   thrustFrac: number
   mdot: number
-  tauRcs: number
+  tauRcs: Vec3       // body-frame RCS torque [x, y, z]
   gust: number
   chuteCdS: number
 }
@@ -327,20 +365,23 @@ interface Ctx {
 interface Diag {
   q: number
   mach: number
-  alpha: number
+  alphaTotal: number   // total 3D angle of attack, radians
+  alphaPitch: number
+  alphaYaw: number
   V: number
   cdAxial: number
   sfAxialG: number
   sfLatG: number
-  tauPassive: number
+  tauPassivePitch: number  // Z_body-axis passive torque (maps to old pitch)
+  tauPassiveYaw: number    // X_body-axis passive torque
   windX: number
-  ax: number
-  ay: number
+  a: Vec3                  // inertial acceleration, local frame
 }
 
 const ZERO_DIAG: Diag = {
-  q: 0, mach: 0, alpha: 0, V: 0, cdAxial: 0, sfAxialG: 0, sfLatG: 0,
-  tauPassive: 0, windX: 0, ax: 0, ay: 0,
+  q: 0, mach: 0, alphaTotal: 0, alphaPitch: 0, alphaYaw: 0, V: 0, cdAxial: 0,
+  sfAxialG: 0, sfLatG: 0, tauPassivePitch: 0, tauPassiveYaw: 0, windX: 0,
+  a: [0, 0, 0],
 }
 
 export const EMPTY_TELEMETRY: Telemetry = {
@@ -352,6 +393,8 @@ export const EMPTY_TELEMETRY: Telemetry = {
   airspeed: 0, flightPathAngle: 0, maxAltitude: 0,
   rcsFuel: 0, rcsTorque: 0, pitchRateCommand: 0, attitudeTarget: 0, gimbalCommand: 0,
   finAngle: 0, bodyLength: 0,
+  positionZ: 0, velocityZ: 0, yawAngle: 0, rollAngle: 0, yawRate: 0, rollRate: 0,
+  gimbalYawAngle: 0, finYawAngle: 0, rcsTorqueYaw: 0, rcsTorqueRoll: 0,
   staticMargin: 0, centerOfGravity: 0, centerOfPressure: 0, momentOfInertia: 0,
   airDensity: 1.225, airPressure: 101325, airTemperature: 288.15, speedOfSound: 340.29,
   windSpeed: 0, cdAxial: 0, chuteState: 0, outcome: 'flying', impactSpeed: 0,
@@ -370,29 +413,39 @@ export class RocketPhysicsEngine {
   private ispSl = 0
   private rcsGas0 = 0
   private structMass = 0
-  private tauRcsMax = 0
+  private tauRcsMax = 0           // pitch/yaw RCS torque authority (uses Ixx)
+  private tauRcsMaxRoll = 0       // roll RCS torque authority (uses Iyy)
   private chuteMainArea = 0
 
   // dynamic state
-  private s: Vec6 = [0, 0, 0, 0, 0, 0]
+  private s: State13 = [0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0]
   private time = 0
   private tLaunch = 0
   private tBurnout: number | null = null
   private prop = 0
   private rcsGas = 0
-  private gimbal = 0
-  private gimbalCmd = 0
-  private fin = 0
-  private tauRcs = 0
+  private gimbalPitch = 0
+  private gimbalYaw = 0
+  private gimbalCmd = 0           // pitch command, deg telemetry compat
+  private gimbalYawCmd = 0
+  private finPitch = 0
+  private finYaw = 0
+  private tauRcs: Vec3 = [0, 0, 0]
   private lastT = 0
   private lastMdot = 0
   private lastFrac = 0
 
   // control
   private pitchInput = 0
+  private yawInput = 0
+  private rollInput = 0
   private assist = true
-  private attHold = 0
-  private omegaCmd = 0
+  private attHoldPitch = 0        // rad, old theta convention (nose-right positive)
+  private attHoldYaw = 0          // rad, nose-right(+X)-positive, matches pitch convention
+  private attHoldRoll = 0         // rad, standard right-hand about +Y_body
+  private omegaCmdPitch = 0
+  private omegaCmdYaw = 0
+  private omegaCmdRoll = 0
 
   // flight bookkeeping
   private stage: FlightStage = 'pre-launch'
@@ -437,24 +490,34 @@ export class RocketPhysicsEngine {
 
     const mp0 = this.massProps()
     this.tauRcsMax = RCS_ACCEL * mp0.I
+    this.tauRcsMaxRoll = RCS_ACCEL * mp0.Iyy
 
     this.chuteMainArea =
       (2 * Math.max(params.dryMass, 1) * G0) / (1.225 * CD_CHUTE * 5.5 * 5.5)
 
-    this.s = [0, 0, 0, 0, 0, 0]
+    this.s = [0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0]
     this.time = 0
     this.tLaunch = 0
     this.tBurnout = null
-    this.gimbal = 0
+    this.gimbalPitch = 0
+    this.gimbalYaw = 0
     this.gimbalCmd = 0
-    this.fin = 0
-    this.tauRcs = 0
+    this.gimbalYawCmd = 0
+    this.finPitch = 0
+    this.finYaw = 0
+    this.tauRcs = [0, 0, 0]
     this.lastT = 0
     this.lastMdot = 0
     this.lastFrac = 0
     this.pitchInput = 0
-    this.attHold = 0
-    this.omegaCmd = 0
+    this.yawInput = 0
+    this.rollInput = 0
+    this.attHoldPitch = 0
+    this.attHoldYaw = 0
+    this.attHoldRoll = 0
+    this.omegaCmdPitch = 0
+    this.omegaCmdYaw = 0
+    this.omegaCmdRoll = 0
     this.stage = 'pre-launch'
     this.maxAltitude = 0
     this.maxQ = 0
@@ -480,6 +543,16 @@ export class RocketPhysicsEngine {
 
   setPitchInput(input: number): void {
     this.setGimbalInput(input)
+  }
+
+  /** New in Phase 1 — physics-only; UI does not need to wire this up yet. */
+  setYawInput(input: number): void {
+    this.yawInput = clamp(input, -1, 1)
+  }
+
+  /** New in Phase 1 — physics-only; UI does not need to wire this up yet. */
+  setRollInput(input: number): void {
+    this.rollInput = clamp(input, -1, 1)
   }
 
   /** true: flight-computer rate command + attitude hold. false: raw gimbal. */
@@ -513,10 +586,24 @@ export class RocketPhysicsEngine {
     const ms = this.structMass
     const m = ms + prop + gas
     const xcg = (ms * g.xStruct + prop * g.xProp + gas * g.xRcs) / m
+
+    // Ixx = Izz: pitch/yaw inertia, exactly the old scalar computation
+    // (parallel-axis theorem along the body's long axis), reused unchanged
+    // for both pitch and yaw planes by axisymmetry (6dof-spec.md §4).
     const Is = ms * ((g.L * g.L) / 12 + (g.xStruct - xcg) ** 2)
     const Ip = prop * ((3 * g.tankR * g.tankR + g.tankLen * g.tankLen) / 12 + (g.xProp - xcg) ** 2)
     const Ir = gas * (g.xRcs - xcg) ** 2
-    return { m, xcg, I: Math.max(Is + Ip + Ir, 0.5) }
+    const I = Math.max(Is + Ip + Ir, 0.5)
+
+    // Iyy: roll inertia, about the body's long axis. Each lump contributes
+    // ~0.5*m*r^2 (thin cylindrical shell/rod approximation) — no parallel-
+    // axis term since the long axis passes through every lump's own centre.
+    const IyyStruct = 0.5 * ms * (g.D / 2) ** 2
+    const IyyProp = 0.5 * prop * g.tankR ** 2
+    const IyyRcs = 0.5 * gas * (0.15 * g.D) ** 2
+    const Iyy = Math.max(IyyStruct + IyyProp + IyyRcs, 0.05)
+
+    return { m, xcg, I, Iyy }
   }
 
   // ───────────────────────── environment ─────────────────────────
@@ -544,91 +631,181 @@ export class RocketPhysicsEngine {
 
   // ───────────────────────── force / torque model ─────────────────────────
 
-  private deriv(s: Vec6, c: Ctx): { d: Vec6; dg: Diag } {
+  private deriv(s: State13, c: Ctx): { d: State13; dg: Diag } {
     const g = this.geom
-    const x = s[0], y = s[1], vx = s[2], vy = s[3], th = s[4], om = s[5]
+    const p: Vec3 = [s[0], s[1], s[2]]
+    const v: Vec3 = [s[3], s[4], s[5]]
+    const q: Quat = [s[6], s[7], s[8], s[9]]
+    const w: Vec3 = [s[10], s[11], s[12]]   // body-frame angular velocity
 
-    const atm = isa1976(y)
-    const windX = this.windProfile(y) + c.gust
-    const vrx = vx - windX
-    const vry = vy
-    const V = Math.hypot(vrx, vry)
-    const q = 0.5 * atm.rho * V * V
+    const atm = isa1976(p[1])
+    const windX = this.windProfile(p[1]) + c.gust
+    const vRel: Vec3 = [v[0] - windX, v[1], v[2]]  // air-relative velocity, local frame
+    const V = V3.length(vRel)
+    const q_dyn = 0.5 * atm.rho * V * V
     const mach = V / atm.a
 
-    const sT = Math.sin(th), cT = Math.cos(th)
-    const bx = sT, by = cT
-    const nx = cT, ny = -sT
+    // bring air-relative velocity into the body frame for the aero model
+    const vBody = Q.qRotateInverse(q, vRel)
     const xcg = c.xcg
 
-    let Fa = 0, Fn = 0, Fc = 0
-    let tauAero = 0, tauDamp = 0, tauFin = 0
-    let alpha = 0, cdAxial = 0
+    let Fa = 0           // axial force magnitude (along +Y_body)
+    let FnPitch = 0, FnYaw = 0   // normal-force components, X_body and Z_body
+    let tauAeroPitch = 0, tauAeroYaw = 0
+    let tauDampPitch = 0, tauDampYaw = 0
+    let tauFinPitch = 0, tauFinYaw = 0
+    let alphaTotal = 0, alphaPitch = 0, alphaYaw = 0, cdAxial = 0
 
     if (V > 0.05) {
-      const phi = Math.atan2(vrx, vry)
-      alpha = wrapPi(th - phi)
-      const sa = Math.sin(alpha), ca = Math.cos(alpha)
+      // total angle of attack: angle between body +Y and the air-relative
+      // velocity, resolved in body frame (6dof-spec.md §5)
+      const vBodyLen = V3.length(vBody)
+      const caTotal = vBodyLen > 1e-9 ? clamp(vBody[1] / vBodyLen, -1, 1) : 1
+      alphaTotal = Math.acos(caTotal)
+      alphaPitch = Math.atan2(vBody[0], vBody[1])
+      alphaYaw = Math.atan2(vBody[2], vBody[1])
+
+      const sa = Math.sin(alphaTotal)
+      const ca = caTotal
 
       const caFront = this.params.dragCoefficient * cdRatio(mach) * (1 - BASE_RELIEF * c.thrustFrac)
       cdAxial = ca >= 0 ? caFront : CA_REAR
-      Fa = -q * g.Aref * cdAxial * ca
+      Fa = -q_dyn * g.Aref * cdAxial * ca
 
       const kM = finMachFactor(mach)
       const sac = sa * Math.abs(ca)
-      const Fnn = q * g.Aref * CNA_NOSE * sac
-      const Fnf = q * g.Aref * g.cnaFin * kM * sac
-      const Fnc = q * g.Aplan * CD_CROSS * sa * Math.abs(sa)
-      Fn = Fnn + Fnf + Fnc
+      const FnnMag = q_dyn * g.Aref * CNA_NOSE * sac
+      const FnfMag = q_dyn * g.Aref * g.cnaFin * kM * sac
+      const FncMag = q_dyn * g.Aplan * CD_CROSS * sa * Math.abs(sa)
+
+      // split each force magnitude into pitch-plane (X_body) and yaw-plane
+      // (Z_body) components, weighted by the body-frame velocity direction
+      // in each plane — this is what makes two of the four fins primarily
+      // resist pitch and two primarily resist yaw, with no extra bookkeeping
+      const sinSum = Math.abs(Math.sin(alphaPitch)) + Math.abs(Math.sin(alphaYaw))
+      const wPitch = sinSum > 1e-9 ? Math.sin(alphaPitch) / sinSum : 0
+      const wYaw = sinSum > 1e-9 ? Math.sin(alphaYaw) / sinSum : 0
+      // signed magnitude of normal force in each plane (restoring: force
+      // direction opposes the local angle of attack, hence the -sign below
+      // matching the old planar model's -sin(alpha) convention)
+      const FnnP = -FnnMag * Math.abs(wPitch) * Math.sign(Math.sin(alphaPitch) || 1)
+      const FnfP = -FnfMag * Math.abs(wPitch) * Math.sign(Math.sin(alphaPitch) || 1)
+      const FncP = -FncMag * Math.abs(wPitch) * Math.sign(Math.sin(alphaPitch) || 1)
+      const FnnY = -FnnMag * Math.abs(wYaw) * Math.sign(Math.sin(alphaYaw) || 1)
+      const FnfY = -FnfMag * Math.abs(wYaw) * Math.sign(Math.sin(alphaYaw) || 1)
+      const FncY = -FncMag * Math.abs(wYaw) * Math.sign(Math.sin(alphaYaw) || 1)
+
+      FnPitch = FnnP + FnfP + FncP
+      FnYaw = FnnY + FnfY + FncY
 
       const dn = g.xNose - xcg
       const df = g.xFin - xcg
-      tauAero = -(dn * Fnn + (g.xFin - xcg) * Fnf + (g.xCross - xcg) * Fnc)
-      tauDamp = (-q * g.Aref * (CNA_NOSE * dn * dn + g.cnaFin * kM * df * df) * om) / Math.max(V, 5)
+      const dc = g.xCross - xcg
+      // torque about Z_body (pitch axis) and X_body (yaw axis) — note the
+      // minus sign matches the old convention's tau = -(x-xcg)*Fn exactly
+      tauAeroPitch = -(dn * FnnP + df * FnfP + dc * FncP)
+      tauAeroYaw = -(dn * FnnY + df * FnfY + dc * FncY)
 
-      // movable control fins: force along +n for delta < 0, so +delta = nose-right torque
-      Fc = -q * g.Aref * g.cnaFin * kM * FIN_CTRL_EFF * c.fin
-      tauFin = -(g.xFin - xcg) * Fc
+      // pitch/yaw damping torque, same formula as the old model, evaluated
+      // per axis using each axis's own body-frame rate
+      const dampCoeff = (-q_dyn * g.Aref * (CNA_NOSE * dn * dn + g.cnaFin * kM * df * df)) / Math.max(V, 5)
+      tauDampPitch = dampCoeff * (-w[2])   // wz maps to old omega with a sign flip
+      tauDampYaw = dampCoeff * w[0]
+
+      // movable control fins: force along the normal direction for
+      // delta < 0, so +delta = nose-right/nose-out torque (matches old sign)
+      const finPitchForce = -q_dyn * g.Aref * g.cnaFin * kM * FIN_CTRL_EFF * c.finPitch
+      const finYawForce = -q_dyn * g.Aref * g.cnaFin * kM * FIN_CTRL_EFF * c.finYaw
+      tauFinPitch = -df * finPitchForce
+      tauFinYaw = -df * finYawForce
     }
 
-    // thrust (force direction = body axis rotated by -gimbal)
-    const psi = th - c.gimbal
-    const tx = c.T * Math.sin(psi)
-    const ty = c.T * Math.cos(psi)
-    const tauThrust = -(g.L - xcg) * (tx * nx + ty * ny)
-    const tauJet = -c.mdot * (g.L - xcg) ** 2 * om
+    // thrust: body +Y axis deflected by (gimbalPitch about Z_body, gimbalYaw
+    // about X_body), then rotated into the local frame by the body
+    // quaternion (6dof-spec.md §6 — pitch gimbal deflects in the X_body-
+    // Y_body plane, yaw gimbal in the Y_body-Z_body plane)
+    const gp = c.gimbalPitch, gy = c.gimbalYaw
+    const thrustDirBody: Vec3 = [-Math.sin(gp), Math.cos(gp) * Math.cos(gy), Math.cos(gp) * Math.sin(gy)]
+    const Fthrust: Vec3 = V3.scale(thrustDirBody, c.T)
+    const rNozzle: Vec3 = [0, -(g.L - xcg), 0]
+    const tauThrustBody = V3.cross(rNozzle, Fthrust)
 
-    // recovery chute, attached at the nose
-    let cx = 0, cy = 0, tauChute = 0
+    // jet damping — resists pitch/yaw rate, zero contribution to roll (the
+    // exhaust plume carries no roll moment of its own)
+    const jetCoeff = -c.mdot * (g.L - xcg) ** 2
+    const tauJetPitch = jetCoeff * (-w[2])
+    const tauJetYaw = jetCoeff * w[0]
+
+    // recovery chute, attached at the nose; forces/torque evaluated at the
+    // attachment point's 3D air-relative velocity
+    let Fchute: Vec3 = [0, 0, 0]
+    let tauChuteBody: Vec3 = [0, 0, 0]
     if (c.chuteCdS > 0) {
-      const vax = vx + om * xcg * nx - windX
-      const vay = vy + om * xcg * ny
-      const Va = Math.hypot(vax, vay)
+      const rNose: Vec3 = [0, xcg, 0]   // nose relative to CG, along +Y_body
+      const vPointLocal = V3.add(v, Q.qRotate(q, V3.cross(w, rNose)))
+      const vaLocal: Vec3 = [vPointLocal[0] - windX, vPointLocal[1], vPointLocal[2]]
+      const Va = V3.length(vaLocal)
       const k = 0.5 * atm.rho * Va * c.chuteCdS
-      cx = -k * vax
-      cy = -k * vay
-      tauChute = xcg * (cx * nx + cy * ny)
+      Fchute = V3.scale(vaLocal, -k)
+      const FchuteBody = Q.qRotateInverse(q, Fchute)
+      tauChuteBody = V3.cross(rNose, FchuteBody)
     }
 
-    // non-gravitational force (what an accelerometer would read)
-    const ngx = Fa * bx + (Fn + Fc) * nx + tx + cx
-    const ngy = Fa * by + (Fn + Fc) * ny + ty + cy
+    // non-gravitational force in BODY frame, then rotate to local for dv/dt
+    const FnonGravBody: Vec3 = [FnPitch, Fa, FnYaw]
+    const FnonGravLocal = V3.add(
+      V3.add(Q.qRotate(q, FnonGravBody), Q.qRotate(q, Fthrust)),
+      Fchute,
+    )
 
-    const { gx, gy } = gravityVector(x, y)
-    const ax = ngx / c.m + gx
-    const ay = ngy / c.m + gy
+    const { g: gravAccel } = gravityVector3(p)
+    const a = V3.add(V3.scale(FnonGravLocal, 1 / c.m), gravAccel)
 
-    const tauPassive = tauAero + tauDamp + tauJet + tauChute
-    const tau = tauPassive + tauThrust + tauFin + c.tauRcs
-    const dom = (tau - c.Idot * om) / c.I
+    // specific force for G-load telemetry — resolved along body axes
+    const specificForceBody = V3.add(FnonGravBody, Q.qRotateInverse(q, V3.add(Fthrust, Fchute)))
+
+    // total body-frame torque. tauAeroPitch/tauDampPitch/tauJetPitch/
+    // tauFinPitch above are computed in OLD-CONVENTION units (positive =
+    // nose-right, matching the planar model's tau = -(x-xcg)*Fn directly);
+    // tauThrustBody/tauChuteBody/c.tauRcs are already true body-frame
+    // (τx, τy, τz) quantities from actual cross products. Per the header's
+    // sign-convention note, τ_z = -τ_old, so the old-convention pitch
+    // torques are negated here when folded into the true τ_z axis. τ_x
+    // (yaw) has no such old-convention ancestor — tauAeroYaw etc. are
+    // defined directly as the X_body-axis torque, so they add unchanged.
+    const tauX = tauAeroYaw + tauDampYaw + tauJetYaw + tauFinYaw + tauChuteBody[0] + tauThrustBody[0] + c.tauRcs[0]
+    const tauZ = -(tauAeroPitch + tauDampPitch + tauJetPitch + tauFinPitch) + tauChuteBody[2] + tauThrustBody[2] + c.tauRcs[2]
+    const tauY = tauChuteBody[1] + tauThrustBody[1] + c.tauRcs[1]
+    const tauBody: Vec3 = [tauX, tauY, tauZ]
+
+    // Euler's rotation equation: I*dw/dt = tau - w x (I*w) - dI/dt * w
+    const Ivec: Vec3 = [c.Ixx, c.Iyy, c.Ixx]      // diag(Ixx, Iyy, Izz), Izz = Ixx
+    const IdotVec: Vec3 = [c.IxxDot, c.IyyDot, c.IxxDot]
+    const Iw = V3.mulComponents(Ivec, w)
+    const gyro = V3.cross(w, Iw)
+    const IdotW = V3.mulComponents(IdotVec, w)
+    const netTau = V3.sub(V3.sub(tauBody, gyro), IdotW)
+    const dw: Vec3 = [netTau[0] / Ivec[0], netTau[1] / Ivec[1], netTau[2] / Ivec[2]]
+
+    const dq = Q.qDerivative(q, w)
+
+    const d: State13 = [
+      v[0], v[1], v[2],
+      a[0], a[1], a[2],
+      dq[0], dq[1], dq[2], dq[3],
+      dw[0], dw[1], dw[2],
+    ]
 
     return {
-      d: [vx, vy, ax, ay, om, dom],
+      d,
       dg: {
-        q, mach, alpha, V, cdAxial,
-        sfAxialG: (ngx * bx + ngy * by) / (c.m * G0),
-        sfLatG: (ngx * nx + ngy * ny) / (c.m * G0),
-        tauPassive, windX, ax, ay,
+        q: q_dyn, mach, alphaTotal, alphaPitch, alphaYaw, V, cdAxial,
+        sfAxialG: specificForceBody[1] / (c.m * G0),
+        sfLatG: Math.hypot(specificForceBody[0], specificForceBody[2]) / (c.m * G0),
+        tauPassivePitch: tauAeroPitch + tauDampPitch + tauJetPitch,
+        tauPassiveYaw: tauAeroYaw + tauDampYaw + tauJetYaw,
+        windX,
+        a,
       },
     }
   }
@@ -667,12 +844,14 @@ export class RocketPhysicsEngine {
 
     // ---- flight computer ----
     const preCtx: Ctx = {
-      m: mp0.m, xcg: mp0.xcg, I: mp0.I, Idot: 0, T, gimbal: this.gimbal, fin: this.fin,
-      thrustFrac: frac, mdot, tauRcs: 0, gust: this.gust, chuteCdS,
+      m: mp0.m, xcg: mp0.xcg, Ixx: mp0.I, Iyy: mp0.Iyy, IxxDot: 0, IyyDot: 0, T,
+      gimbalPitch: this.gimbalPitch, gimbalYaw: this.gimbalYaw,
+      finPitch: this.finPitch, finYaw: this.finYaw,
+      thrustFrac: frac, mdot, tauRcs: [0, 0, 0], gust: this.gust, chuteCdS,
     }
     const pre = this.deriv(s, preCtx)
     let rcsUsed = 0
-    this.controlStep(s, pre.dg.tauPassive, mp0, T, h, chuteCdS > 0, (u) => (rcsUsed = u))
+    this.controlStep(s, pre.dg.tauPassivePitch, pre.dg.tauPassiveYaw, mp0, T, h, chuteCdS > 0, (u) => (rcsUsed = u))
 
     const gasEnd = Math.max(this.rcsGas - rcsUsed, 0)
     const mp1 = this.massProps(propEnd, gasEnd)
@@ -680,6 +859,7 @@ export class RocketPhysicsEngine {
       m: 0.5 * (mp0.m + mp1.m),
       xcg: 0.5 * (mp0.xcg + mp1.xcg),
       I: 0.5 * (mp0.I + mp1.I),
+      Iyy: 0.5 * (mp0.Iyy + mp1.Iyy),
     }
 
     // ---- gusts (Ornstein-Uhlenbeck) ----
@@ -688,18 +868,26 @@ export class RocketPhysicsEngine {
 
     // ---- RK4 ----
     const ctx: Ctx = {
-      m: mpm.m, xcg: mpm.xcg, I: mpm.I, Idot: (mp1.I - mp0.I) / h, T,
-      gimbal: this.gimbal, fin: this.fin, thrustFrac: frac, mdot, tauRcs: this.tauRcs,
+      m: mpm.m, xcg: mpm.xcg, Ixx: mpm.I, Iyy: mpm.Iyy,
+      IxxDot: (mp1.I - mp0.I) / h, IyyDot: (mp1.Iyy - mp0.Iyy) / h, T,
+      gimbalPitch: this.gimbalPitch, gimbalYaw: this.gimbalYaw,
+      finPitch: this.finPitch, finYaw: this.finYaw,
+      thrustFrac: frac, mdot, tauRcs: this.tauRcs,
       gust: this.gust, chuteCdS,
     }
     const k1 = this.deriv(s, ctx)
     const k2 = this.deriv(this.addScaled(s, k1.d, h / 2), ctx)
     const k3 = this.deriv(this.addScaled(s, k2.d, h / 2), ctx)
     const k4 = this.deriv(this.addScaled(s, k3.d, h), ctx)
-    for (let i = 0; i < 6; i++) {
+    for (let i = 0; i < STATE_LEN; i++) {
       s[i] += (h / 6) * (k1.d[i] + 2 * k2.d[i] + 2 * k3.d[i] + k4.d[i])
     }
-    s[4] = wrapPi(s[4])
+
+    // renormalize the orientation quaternion — MUST happen after every RK4
+    // step (6dof-spec.md §7); numerical drift otherwise grows |q| off the
+    // unit sphere over a long flight
+    const qn = Q.qNormalize([s[6], s[7], s[8], s[9]])
+    s[6] = qn[0]; s[7] = qn[1]; s[8] = qn[2]; s[9] = qn[3]
 
     this.prop = propEnd
     this.rcsGas = gasEnd
@@ -717,104 +905,192 @@ export class RocketPhysicsEngine {
     this.maxMach = Math.max(this.maxMach, k1.dg.mach)
   }
 
-  private addScaled(s: Vec6, d: Vec6, k: number): Vec6 {
-    return [s[0] + k * d[0], s[1] + k * d[1], s[2] + k * d[2], s[3] + k * d[3], s[4] + k * d[4], s[5] + k * d[5]]
+  private addScaled(s: State13, d: State13, k: number): State13 {
+    const out = new Array(STATE_LEN) as State13
+    for (let i = 0; i < STATE_LEN; i++) out[i] = s[i] + k * d[i]
+    return out
   }
 
   // ───────────────────────── flight computer ─────────────────────────
 
   private controlStep(
-    s: Vec6, tauPassive: number, mp: MassProps, T: number, h: number,
+    s: State13, tauPassivePitch: number, tauPassiveYaw: number, mp: MassProps, T: number, h: number,
     chuteOut: boolean, setRcsUsed: (u: number) => void,
   ): void {
     const g = this.geom
-    const th = s[4], om = s[5]
+    const w: Vec3 = [s[10], s[11], s[12]]
+    // old-convention pitch angle/rate: bodyAngle = atan2(bodyDir.x, bodyDir.y)
+    const q: Quat = [s[6], s[7], s[8], s[9]]
+    const bodyDir = Q.qRotate(q, [0, 1, 0])
+    const thPitch = Math.atan2(bodyDir[0], bodyDir[1])
+    const thYaw = Math.atan2(bodyDir[2], bodyDir[1])
+    const omPitch = -w[2]   // maps body wz to old clockwise-positive omega
+    const omYaw = w[0]
+    const omRoll = w[1]
+
     const arm = g.L - mp.xcg
-    let gimCmd = 0
-    let finCmd = 0
-    let tauRcs = 0
+    let gimCmdPitch = 0, gimCmdYaw = 0
+    let finCmdPitch = 0, finCmdYaw = 0
+    const tauRcsOut: [number, number, number] = [0, 0, 0]
     let rcsUsed = 0
 
     const active = this.liftedOff || this.railCleared || this.stage === 'powered-ascent'
     if (!chuteOut && active) {
       if (this.assist) {
-        let omCmd: number
+        // ---- pitch axis ----
+        let omCmdPitch: number
         if (Math.abs(this.pitchInput) > 0.01) {
-          omCmd = this.pitchInput * OMEGA_MAX
-          this.attHold = wrapPi(th + om * 0.3)
+          omCmdPitch = this.pitchInput * OMEGA_MAX
+          this.attHoldPitch = wrapPi(thPitch + omPitch * 0.3)
         } else {
-          omCmd = clamp(K_THETA * wrapPi(this.attHold - th), -OMEGA_MAX, OMEGA_MAX)
+          omCmdPitch = clamp(K_THETA * wrapPi(this.attHoldPitch - thPitch), -OMEGA_MAX, OMEGA_MAX)
         }
-        this.omegaCmd = omCmd
-        const tauNeed = mp.I * K_OMEGA * (omCmd - om) - tauPassive
+        this.omegaCmdPitch = omCmdPitch
+        const tauNeedPitch = mp.I * K_OMEGA * (omCmdPitch - omPitch) - tauPassivePitch
 
-        // control allocation: share the demanded torque between TVC and the
-        // aerodynamic fins in proportion to the authority each has right now
+        // ---- yaw axis (same structure, independent) ----
+        let omCmdYaw: number
+        if (Math.abs(this.yawInput) > 0.01) {
+          omCmdYaw = this.yawInput * OMEGA_MAX
+          this.attHoldYaw = wrapPi(thYaw + omYaw * 0.3)
+        } else {
+          omCmdYaw = clamp(K_THETA * wrapPi(this.attHoldYaw - thYaw), -OMEGA_MAX, OMEGA_MAX)
+        }
+        this.omegaCmdYaw = omCmdYaw
+        const tauNeedYaw = mp.I * K_OMEGA * (omCmdYaw - omYaw) - tauPassiveYaw
+
+        // ---- roll axis — RCS only, no TVC/fin authority (6dof-spec.md §6) ----
+        let omCmdRoll: number
+        if (Math.abs(this.rollInput) > 0.01) {
+          omCmdRoll = this.rollInput * OMEGA_MAX
+          this.attHoldRoll = wrapPi(0 + omRoll * 0.3)
+        } else {
+          omCmdRoll = clamp(K_THETA * wrapPi(this.attHoldRoll - 0), -OMEGA_MAX, OMEGA_MAX)
+          // roll has no particular orientation that matters for an unguided
+          // ascent — hold current roll by tracking zero relative to itself
+          this.attHoldRoll = 0
+          omCmdRoll = Math.abs(this.rollInput) > 0.01 ? omCmdRoll : clamp(-K_THETA * 0, -OMEGA_MAX, OMEGA_MAX)
+        }
+        this.omegaCmdRoll = omCmdRoll
+        const tauNeedRoll = mp.Iyy * K_OMEGA * (omCmdRoll - omRoll)
+
+        // control allocation for pitch/yaw: share demanded torque between
+        // TVC and aero fins in proportion to current authority
         const sinMax = Math.sin(GIMBAL_MAX)
         const tvcAuth = T > 1 && arm > 0.05 ? T * arm * sinMax : 0
         const finLever = Math.max(g.xFin - mp.xcg, 0)
         const finGain =
-          this.diag.q * g.Aref * g.cnaFin * finMachFactor(this.diag.mach) * FIN_CTRL_EFF * finLever // N*m per rad
+          this.diag.q * g.Aref * g.cnaFin * finMachFactor(this.diag.mach) * FIN_CTRL_EFF * finLever
         const finAuth = finGain * FIN_CTRL_MAX
         const authSum = tvcAuth + finAuth
 
-        let tauGimbal = 0
-        let tauFin = 0
-        if (authSum > 1e-9) {
+        const allocate = (tauNeed: number): { gim: number; fin: number; tauGim: number; tauFin: number } => {
+          if (authSum <= 1e-9) return { gim: 0, fin: 0, tauGim: 0, tauFin: 0 }
           const total = clamp(tauNeed, -authSum, authSum)
           const tauG = (total * tvcAuth) / authSum
           const tauF = (total * finAuth) / authSum
+          let gim = 0, tauGim = 0
+          let fin = 0, tauFin = 0
           if (tvcAuth > 0) {
-            gimCmd = Math.asin(clamp(tauG / (T * arm), -sinMax, sinMax))
-            tauGimbal = T * Math.sin(gimCmd) * arm
+            gim = Math.asin(clamp(tauG / (T * arm), -sinMax, sinMax))
+            tauGim = T * Math.sin(gim) * arm
           }
           if (finGain > 1e-9) {
-            finCmd = clamp(tauF / finGain, -FIN_CTRL_MAX, FIN_CTRL_MAX)
-            tauFin = finGain * finCmd
+            fin = clamp(tauF / finGain, -FIN_CTRL_MAX, FIN_CTRL_MAX)
+            tauFin = finGain * fin
           }
+          return { gim, fin, tauGim, tauFin }
         }
 
-        const resid = tauNeed - tauGimbal - tauFin
-        if (Math.abs(resid) > RCS_DEADBAND * this.tauRcsMax && this.rcsGas > 0) {
-          tauRcs = clamp(resid, -this.tauRcsMax, this.tauRcsMax)
-          const thrusterForce = Math.abs(tauRcs) / g.rcsCouple
-          const wanted = ((2 * thrusterForce) / (ISP_COLD * G0)) * h   // kg for the thruster pair
-          rcsUsed = Math.min(wanted, this.rcsGas)
-          if (wanted > 0) tauRcs *= rcsUsed / wanted                  // gas running out -> less torque
+        const allocPitch = allocate(tauNeedPitch)
+        const allocYaw = allocate(tauNeedYaw)
+        gimCmdPitch = allocPitch.gim
+        finCmdPitch = allocPitch.fin
+        gimCmdYaw = allocYaw.gim
+        finCmdYaw = allocYaw.fin
+
+        const residPitch = tauNeedPitch - allocPitch.tauGim - allocPitch.tauFin
+        const residYaw = tauNeedYaw - allocYaw.tauGim - allocYaw.tauFin
+
+        // RCS: pitch/yaw residual (maps to body Z/X axes) plus roll, sharing
+        // one finite cold-gas budget (6dof-spec.md §6)
+        let tauRcsZ = 0, tauRcsX = 0, tauRcsY = 0
+        let gasWanted = 0
+        if (Math.abs(residPitch) > RCS_DEADBAND * this.tauRcsMax && this.rcsGas > 0) {
+          tauRcsZ = clamp(-residPitch, -this.tauRcsMax, this.tauRcsMax)  // -residPitch: tauZ maps to -old pitch torque
+          const force = Math.abs(tauRcsZ) / g.rcsCouple
+          gasWanted += ((2 * force) / (ISP_COLD * G0)) * h
         }
+        if (Math.abs(residYaw) > RCS_DEADBAND * this.tauRcsMax && this.rcsGas > 0) {
+          tauRcsX = clamp(residYaw, -this.tauRcsMax, this.tauRcsMax)
+          const force = Math.abs(tauRcsX) / g.rcsCouple
+          gasWanted += ((2 * force) / (ISP_COLD * G0)) * h
+        }
+        if (Math.abs(tauNeedRoll) > RCS_DEADBAND * this.tauRcsMaxRoll && this.rcsGas > 0) {
+          tauRcsY = clamp(tauNeedRoll, -this.tauRcsMaxRoll, this.tauRcsMaxRoll)
+          const force = Math.abs(tauRcsY) / g.rcsCouple
+          gasWanted += ((2 * force) / (ISP_COLD * G0)) * h
+        }
+        if (gasWanted > 0) {
+          const gasAvail = Math.min(gasWanted, this.rcsGas)
+          const scale = gasAvail / gasWanted
+          tauRcsZ *= scale; tauRcsX *= scale; tauRcsY *= scale
+          rcsUsed = gasAvail
+        }
+        tauRcsOut[0] = tauRcsX
+        tauRcsOut[1] = tauRcsY
+        tauRcsOut[2] = tauRcsZ
       } else {
-        this.omegaCmd = 0
-        gimCmd = T > 1 ? this.pitchInput * GIMBAL_MAX : 0
-        finCmd = this.pitchInput * FIN_CTRL_MAX
+        this.omegaCmdPitch = 0
+        this.omegaCmdYaw = 0
+        this.omegaCmdRoll = 0
+        gimCmdPitch = T > 1 ? this.pitchInput * GIMBAL_MAX : 0
+        gimCmdYaw = T > 1 ? this.yawInput * GIMBAL_MAX : 0
+        finCmdPitch = this.pitchInput * FIN_CTRL_MAX
+        finCmdYaw = this.yawInput * FIN_CTRL_MAX
+        if (Math.abs(this.rollInput) > 0.01 && this.rcsGas > 0) {
+          tauRcsOut[1] = clamp(this.rollInput * this.tauRcsMaxRoll, -this.tauRcsMaxRoll, this.tauRcsMaxRoll)
+          const force = Math.abs(tauRcsOut[1]) / g.rcsCouple
+          rcsUsed = Math.min(((2 * force) / (ISP_COLD * G0)) * h, this.rcsGas)
+        }
       }
     } else {
-      this.omegaCmd = 0
+      this.omegaCmdPitch = 0
+      this.omegaCmdYaw = 0
+      this.omegaCmdRoll = 0
     }
 
-    // gimbal actuator: first-order lag, rate limit, travel limit
-    const rate = clamp((gimCmd - this.gimbal) / GIMBAL_TAU, -GIMBAL_RATE, GIMBAL_RATE)
-    this.gimbal = clamp(this.gimbal + rate * h, -GIMBAL_MAX, GIMBAL_MAX)
-    this.gimbalCmd = gimCmd
+    // gimbal actuators: first-order lag, rate limit, travel limit — per axis
+    const rateP = clamp((gimCmdPitch - this.gimbalPitch) / GIMBAL_TAU, -GIMBAL_RATE, GIMBAL_RATE)
+    this.gimbalPitch = clamp(this.gimbalPitch + rateP * h, -GIMBAL_MAX, GIMBAL_MAX)
+    this.gimbalCmd = gimCmdPitch
 
-    // control-fin actuator: same structure, faster and with its own travel limit
-    const frate = clamp((finCmd - this.fin) / FIN_CTRL_TAU, -FIN_CTRL_RATE, FIN_CTRL_RATE)
-    this.fin = clamp(this.fin + frate * h, -FIN_CTRL_MAX, FIN_CTRL_MAX)
+    const rateY = clamp((gimCmdYaw - this.gimbalYaw) / GIMBAL_TAU, -GIMBAL_RATE, GIMBAL_RATE)
+    this.gimbalYaw = clamp(this.gimbalYaw + rateY * h, -GIMBAL_MAX, GIMBAL_MAX)
+    this.gimbalYawCmd = gimCmdYaw
 
-    this.tauRcs = tauRcs
+    // control-fin actuators: same structure, faster, own travel limit
+    const frateP = clamp((finCmdPitch - this.finPitch) / FIN_CTRL_TAU, -FIN_CTRL_RATE, FIN_CTRL_RATE)
+    this.finPitch = clamp(this.finPitch + frateP * h, -FIN_CTRL_MAX, FIN_CTRL_MAX)
+
+    const frateY = clamp((finCmdYaw - this.finYaw) / FIN_CTRL_TAU, -FIN_CTRL_RATE, FIN_CTRL_RATE)
+    this.finYaw = clamp(this.finYaw + frateY * h, -FIN_CTRL_MAX, FIN_CTRL_MAX)
+
+    this.tauRcs = tauRcsOut
     setRcsUsed(rcsUsed)
   }
 
   // ───────────────────────── recovery ─────────────────────────
 
-  private updateChute(q: number, s: Vec6): void {
+  private updateChute(q: number, s: State13): void {
     const burnedOut = this.prop <= 0 && this.tBurnout !== null && this.time > this.tBurnout + TAILOFF
     if (this.chuteState === 0) {
-      if (burnedOut && s[3] < -1 && s[1] > 20 && q < CHUTE_Q_MAX) {
+      if (burnedOut && s[4] < -1 && s[1] > 20 && q < CHUTE_Q_MAX) {
         this.chuteState = 1
         this.tDrogue = this.time
       }
     } else if (this.chuteState === 1) {
-      if (s[3] < 0 && s[1] < MAIN_ALT && s[1] > 15 && q < MAIN_Q_MAX) {
+      if (s[4] < 0 && s[1] < MAIN_ALT && s[1] > 15 && q < MAIN_Q_MAX) {
         this.chuteState = 2
         this.tMain = this.time
       }
@@ -842,33 +1118,40 @@ export class RocketPhysicsEngine {
       if (s[1] >= g.L) {
         this.railCleared = true
       } else {
-        s[0] = 0; s[2] = 0; s[4] = 0; s[5] = 0
+        // constrain to vertical motion only, zero all rotation, while on the rail
+        s[0] = 0; s[2] = 0; s[3] = 0; s[5] = 0
+        s[6] = 0; s[7] = 0; s[8] = 0; s[9] = 1
+        s[10] = 0; s[11] = 0; s[12] = 0
       }
     }
 
-    if (s[1] <= 0 && s[3] <= 0) {
+    if (s[1] <= 0 && s[4] <= 0) {
       if (this.liftedOff && this.railCleared) {
         this.touchdown()
         return
       }
       s[1] = 0
-      s[3] = 0
+      s[4] = 0
     }
   }
 
   private touchdown(): void {
     const s = this.s
-    this.impactSpeed = Math.hypot(s[2], s[3])
-    const tilt = Math.abs(wrapPi(s[4]))
-    const spin = Math.abs(s[5])
+    this.impactSpeed = V3.length([s[3], s[4], s[5]])
+    const q: Quat = [s[6], s[7], s[8], s[9]]
+    const bodyDir = Q.qRotate(q, [0, 1, 0])
+    const tiltFromVertical = Math.acos(clamp(bodyDir[1], -1, 1))
+    const spin = V3.length([s[10], s[11], s[12]])
     this.outcome =
-      this.impactSpeed <= LAND_V_MAX && tilt <= LAND_TILT_MAX && spin <= LAND_SPIN_MAX
+      this.impactSpeed <= LAND_V_MAX && tiltFromVertical <= LAND_TILT_MAX && spin <= LAND_SPIN_MAX
         ? 'landed'
         : 'crashed'
-    s[1] = 0; s[2] = 0; s[3] = 0; s[5] = 0
-    this.gimbal = 0; this.gimbalCmd = 0; this.fin = 0; this.tauRcs = 0
+    s[1] = 0; s[3] = 0; s[4] = 0; s[5] = 0
+    s[10] = 0; s[11] = 0; s[12] = 0
+    this.gimbalPitch = 0; this.gimbalYaw = 0; this.gimbalCmd = 0; this.gimbalYawCmd = 0
+    this.finPitch = 0; this.finYaw = 0; this.tauRcs = [0, 0, 0]
     this.lastT = 0; this.lastMdot = 0; this.lastFrac = 0
-    this.omegaCmd = 0
+    this.omegaCmdPitch = 0; this.omegaCmdYaw = 0; this.omegaCmdRoll = 0
   }
 
   // ───────────────────────── flight stage ─────────────────────────
@@ -877,7 +1160,7 @@ export class RocketPhysicsEngine {
     if (this.outcome !== 'flying') { this.stage = 'descent'; return }
     if (this.prop > 0 || this.lastFrac > 0) { this.stage = 'powered-ascent'; return }
     if (!this.liftedOff) { this.stage = 'descent'; return }
-    const vy = this.s[3]
+    const vy = this.s[4]
     const nearPeak = this.s[1] >= this.maxAltitude - 0.05
     if (vy > 0.5) this.stage = 'coast'
     else if (nearPeak && Math.abs(vy) <= 0.5) this.stage = 'apogee'
@@ -892,29 +1175,43 @@ export class RocketPhysicsEngine {
     const mp = this.massProps()
     const atm = isa1976(s[1])
     const d = this.diag
+    const q: Quat = [s[6], s[7], s[8], s[9]]
+    const w: Vec3 = [s[10], s[11], s[12]]
 
     const cnaN = CNA_NOSE
     const cnaF = g.cnaFin * finMachFactor(d.mach)
     const xcp = (cnaN * g.xNose + cnaF * g.xFin) / (cnaN + cnaF)
-    const { g: grav } = gravityVector(s[0], s[1])
-    const speed = Math.hypot(s[2], s[3])
-    const fpa = speed > 0.5 ? Math.atan2(s[2], s[3]) * DEG : 0
+    const { g: gravVec } = gravityVector3([s[0], s[1], s[2]])
+    const grav = V3.length(gravVec)
+    const speed = V3.length([s[3], s[4], s[5]])
+    const fpa = speed > 0.5 ? Math.atan2(s[3], s[4]) * DEG : 0
+
+    // old-convention pitch angle/rate: nose-right positive, from body +Y
+    // expressed in the local frame — matches the planar model exactly when
+    // yaw/roll are zero (6dof-spec.md §2 sign-convention note)
+    const bodyDir = Q.qRotate(q, [0, 1, 0])
+    const bodyAngle = Math.atan2(bodyDir[0], bodyDir[1])
+    const yawAngle = Math.atan2(bodyDir[2], bodyDir[1])
+    const { roll: rollAngle } = Q.qToPitchYawRoll(q)
+    const omegaPitch = -w[2]
+    const omegaYaw = w[0]
+    const omegaRoll = w[1]
 
     return {
       time: round(this.time),
       altitude: round(s[1]),
-      velocity: round(s[3]),
-      acceleration: round(d.ay),
+      velocity: round(s[4]),
+      acceleration: round(d.a[1]),
       mass: round(mp.m),
       stage: this.stage,
 
       lateralOffset: round(s[0]),
-      lateralVelocity: round(s[2]),
+      lateralVelocity: round(s[3]),
 
-      bodyAngle: round(s[4] * DEG),
-      angularVelocity: round(s[5] * DEG),
-      gimbalAngle: round(this.gimbal * DEG),
-      angleOfAttack: round(Math.abs(d.alpha) * DEG),
+      bodyAngle: round(bodyAngle * DEG),
+      angularVelocity: round(omegaPitch * DEG),
+      gimbalAngle: round(this.gimbalPitch * DEG),
+      angleOfAttack: round(Math.abs(d.alphaTotal) * DEG),
 
       dynamicPressure: round(d.q),
       machNumber: round(d.mach, 4),
@@ -933,12 +1230,23 @@ export class RocketPhysicsEngine {
       maxAltitude: round(this.maxAltitude),
 
       rcsFuel: round(this.rcsGas, 3),
-      rcsTorque: round(this.tauRcs),
-      pitchRateCommand: round(this.omegaCmd * DEG),
-      attitudeTarget: round(this.attHold * DEG),
+      rcsTorque: round(this.tauRcs[2]),
+      pitchRateCommand: round(this.omegaCmdPitch * DEG),
+      attitudeTarget: round(this.attHoldPitch * DEG),
       gimbalCommand: round(this.gimbalCmd * DEG),
-      finAngle: round(this.fin * DEG),
+      finAngle: round(this.finPitch * DEG),
       bodyLength: round(g.L, 3),
+
+      positionZ: round(s[2]),
+      velocityZ: round(s[5]),
+      yawAngle: round(yawAngle * DEG),
+      rollAngle: round(rollAngle * DEG),
+      yawRate: round(omegaYaw * DEG),
+      rollRate: round(omegaRoll * DEG),
+      gimbalYawAngle: round(this.gimbalYaw * DEG),
+      finYawAngle: round(this.finYaw * DEG),
+      rcsTorqueYaw: round(this.tauRcs[0]),
+      rcsTorqueRoll: round(this.tauRcs[1]),
 
       staticMargin: round((xcp - mp.xcg) / g.D),
       centerOfGravity: round(mp.xcg),
@@ -972,7 +1280,9 @@ export class RocketPhysicsEngine {
       exitArea: this.ae,
       initialMass: mp.m,
       initialInertia: mp.I,
+      initialInertiaRoll: mp.Iyy,
       rcsTorqueMax: this.tauRcsMax,
+      rcsTorqueMaxRoll: this.tauRcsMaxRoll,
       chuteMainArea: this.chuteMainArea,
     }
   }
