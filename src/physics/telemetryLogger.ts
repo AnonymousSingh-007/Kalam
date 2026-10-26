@@ -1,34 +1,36 @@
 /**
- * telemetryLogger.ts — per-session flight-telemetry logger.
+ * telemetryLogger.ts — per-session flight-telemetry logger (DEV-ONLY).
  *
- * Standalone module, no dependency on rocketPhysics.ts or React — just
- * plain state + a browser download. One logger instance should live for
- * the whole app lifetime (like `machine`/`gestures` in App.tsx); call
- * `startSession()` at the same point `engine.launch()` is called, and feed
- * it every telemetry snapshot you already compute in the main loop.
+ * Writes a plain-text .log file straight into a `logs/` folder inside the
+ * project, using the browser's File System Access API (Chrome/Edge only —
+ * no polyfill for Firefox/Safari, this is explicitly a local dev tool for
+ * chasing the current 6-DOF instability, not something that ships to the
+ * deployed build). Each flight session REWRITES logs/current-flight.log
+ * from scratch — that's the "rewritten for every session" behavior — and
+ * samples telemetry once every 0.5s of SIM TIME (not wall clock, since the
+ * rAF loop's dt varies and is capped).
  *
- * Sampling is keyed off TELEMETRY SIM TIME (t.time), not wall-clock frame
- * timestamps — the rAF loop's dt varies and is capped, so sim time is the
- * only clock that behaves the same on a fast machine and a slow one. A
- * sample is recorded the first time sim time crosses each 0.5s boundary
- * (0, 0.5, 1.0, 1.5, ...), so the log has one row per half-second of
- * flight regardless of actual frame rate.
+ * One-time setup per browser tab: call `telemetryLogger.chooseLogFolder()`
+ * once (e.g. from a dev-only button, or the browser console) to grant
+ * permission to the project's `logs/` folder. After that, every launch
+ * writes straight to disk with no download/save-as dialog. If permission
+ * was never granted (or the browser doesn't support the API), this falls
+ * back to a one-shot browser download of the same plain-text content, so
+ * nothing silently does nothing.
  *
- * Each call to startSession() discards whatever was buffered before and
- * begins a brand-new log — "rewritten for every session" per the design
- * intent: nothing carries over between flights, and a session that never
- * reaches a terminal outcome (landed/crashed) just never gets flushed,
- * which is the correct behavior for an aborted run.
+ * IMPORTANT: add `logs/` to the project's .gitignore so these never get
+ * committed — this logger exists only to debug the current branch's 6-DOF
+ * work and goes away before this app is ever deployed.
  */
 
 import type { Telemetry } from '../types'
 
 const SAMPLE_INTERVAL = 0.5 // seconds of SIM time between log rows
+const LOG_FILENAME = 'current-flight.log'
 
-/** The subset of Telemetry fields worth logging — everything, basically,
- *  but named out explicitly so a future Telemetry field addition doesn't
- *  silently vanish from new logs without a deliberate decision to add it
- *  here. Kept as a flat list so the CSV header and row stay in lockstep. */
+/** Flat field list so the log's column line and each row stay in lockstep.
+ *  Named out explicitly so a future Telemetry field addition doesn't
+ *  silently vanish from new logs without a deliberate decision to add it. */
 const LOG_FIELDS: Array<keyof Telemetry> = [
   'time', 'stage', 'outcome',
   'altitude', 'velocity', 'acceleration',
@@ -57,6 +59,25 @@ interface LogRow {
   t: Telemetry
 }
 
+// Minimal structural types for the File System Access API — not in every
+// TS lib.dom.d.ts version yet, so declared locally rather than depending
+// on a specific lib target.
+interface FsFileHandle {
+  createWritable(): Promise<FsWritable>
+}
+interface FsWritable {
+  write(data: string): Promise<void>
+  close(): Promise<void>
+}
+interface FsDirHandle {
+  getFileHandle(name: string, opts?: { create?: boolean }): Promise<FsFileHandle>
+}
+declare global {
+  interface Window {
+    showDirectoryPicker?: (opts?: { id?: string; mode?: 'read' | 'readwrite' }) => Promise<FsDirHandle>
+  }
+}
+
 export class TelemetryLogger {
   private rows: LogRow[] = []
   private nextSampleAt = 0
@@ -64,13 +85,33 @@ export class TelemetryLogger {
   private sessionId = ''
   private meta: SessionMeta = {}
   private flushed = false
+  private dirHandle: FsDirHandle | null = null
+
+  /** One-time per tab: ask the browser for write access to a folder (pick
+   *  the project's `logs/` folder, creating it first in VS Code's file
+   *  explorer if it doesn't exist yet). Call this from a dev button or the
+   *  console — browsers require a user gesture for showDirectoryPicker, so
+   *  it can't be triggered automatically on page load. Silently does
+   *  nothing if the API isn't available (non-Chromium browser). */
+  async chooseLogFolder(): Promise<boolean> {
+    if (!window.showDirectoryPicker) {
+      console.warn('[telemetryLogger] File System Access API not available in this browser — falling back to download.')
+      return false
+    }
+    try {
+      this.dirHandle = await window.showDirectoryPicker({ id: 'kalam-logs', mode: 'readwrite' })
+      console.info('[telemetryLogger] Log folder granted — flights will write logs/current-flight.log directly.')
+      return true
+    } catch {
+      console.warn('[telemetryLogger] Log folder permission was not granted — falling back to download.')
+      return false
+    }
+  }
 
   /** Call this exactly where the engine is launched (handleLaunch in
-   *  App.tsx). Wipes any previous session's buffer — "rewritten for every
-   *  session" means the OLD in-memory log is discarded here, not that the
-   *  old downloaded file is touched; each session produces its own
-   *  separately-named file via autoDownload() so nothing overwrites a
-   *  prior flight's download on disk. */
+   *  App.tsx). Wipes the in-memory buffer — every new flight's log
+   *  REWRITES current-flight.log from scratch once flushed, so nothing
+   *  from a previous session lingers in the file. */
   startSession(meta: SessionMeta = {}): void {
     this.rows = []
     this.nextSampleAt = 0
@@ -93,28 +134,49 @@ export class TelemetryLogger {
   }
 
   /** Call when the flight reaches a terminal outcome ('landed' | 'crashed')
-   *  or whenever you want the current buffer written out. Triggers a
-   *  browser download and marks the session flushed so repeated calls
-   *  (e.g. outcome checked every frame after landing) don't re-download. */
+   *  or whenever you want the current buffer written out. Writes (or
+   *  re-writes) logs/current-flight.log and marks the session flushed so
+   *  repeated calls (outcome checked every frame after landing) don't
+   *  write over and over. */
   flushIfDone(t: Telemetry): void {
     if (this.flushed) return
     if (t.outcome === 'flying') return
     this.record(t) // make sure the final state is captured even off-cadence
-    this.download()
+    void this.write()
     this.flushed = true
   }
 
-  /** Force a download right now regardless of outcome — useful for a
-   *  manual "dump telemetry" debug button, or calling this from the
-   *  browser console mid-flight to see what's logged so far. */
-  download(): void {
+  /** Write the current buffer out now, regardless of outcome — useful to
+   *  pull a partial log mid-flight from the console:
+   *  `telemetryLogger.write()`. Writes to logs/current-flight.log if a
+   *  folder handle was granted via chooseLogFolder(); otherwise falls back
+   *  to a one-shot browser download of the identical text so nothing is
+   *  silently lost. */
+  async write(): Promise<void> {
     if (this.rows.length === 0) return
-    const csv = this.toCsv()
-    const blob = new Blob([csv], { type: 'text/csv' })
+    const text = this.toLog()
+
+    if (this.dirHandle) {
+      try {
+        const fileHandle = await this.dirHandle.getFileHandle(LOG_FILENAME, { create: true })
+        const writable = await fileHandle.createWritable() // truncates — full rewrite each flush
+        await writable.write(text)
+        await writable.close()
+        console.info(`[telemetryLogger] Wrote logs/${LOG_FILENAME} (${this.rows.length} rows).`)
+        return
+      } catch (err) {
+        console.warn('[telemetryLogger] Failed to write to the granted log folder, falling back to download.', err)
+      }
+    }
+    this.downloadFallback(text)
+  }
+
+  private downloadFallback(text: string): void {
+    const blob = new Blob([text], { type: 'text/plain' })
     const url = URL.createObjectURL(blob)
     const a = document.createElement('a')
     a.href = url
-    a.download = `kalam-flight-${this.sessionId}.csv`
+    a.download = LOG_FILENAME
     document.body.appendChild(a)
     a.click()
     document.body.removeChild(a)
@@ -126,18 +188,17 @@ export class TelemetryLogger {
     return this.rows
   }
 
-  private toCsv(): string {
-    const header = ['wallTimeMs', ...LOG_FIELDS].join(',')
-    const metaLine = `# session=${this.sessionId} vehicle=${this.meta.vehicleId ?? ''} params=${JSON.stringify(this.meta.params ?? {})}`
+  private toLog(): string {
+    const metaLine = `session=${this.sessionId} vehicle=${this.meta.vehicleId ?? ''} params=${JSON.stringify(this.meta.params ?? {})}`
+    const header = ['wallTimeMs', ...LOG_FIELDS].join('\t')
     const lines = this.rows.map((row) => {
       const cells = [row.wallTime.toFixed(0)]
       for (const f of LOG_FIELDS) {
-        const v = row.t[f]
-        cells.push(typeof v === 'number' ? String(v) : `"${String(v)}"`)
+        cells.push(String(row.t[f]))
       }
-      return cells.join(',')
+      return cells.join('\t')
     })
-    return [metaLine, header, ...lines].join('\n')
+    return [metaLine, header, ...lines].join('\n') + '\n'
   }
 }
 
