@@ -3,7 +3,6 @@ import { HandTracker } from './hand/handTracker'
 import { countFingers } from './hand/fingerCount'
 import { CountdownMachine } from './state/countdownMachine'
 import { RocketPhysicsEngine, EMPTY_TELEMETRY } from './physics/rocketPhysics'
-import { telemetryLogger } from './physics/telemetryLogger'
 import { checkFlightSanity } from './flightSanity'
 import { checkWatchdog } from './flightWatchdog'
 import { CommentaryEngine } from './commentary/commentaryEngine'
@@ -143,9 +142,6 @@ function App() {
 
         const t = telemetryRef.current
         if (t) {
-          telemetryLogger.record(t)
-          telemetryLogger.flushIfDone(t)
-
           // local, rule-based watchdog — no 3rd-party API, just threshold
           // checks against telemetry the engine already produces. Catches
           // the control loop losing attitude authority (extreme-TWR
@@ -219,10 +215,6 @@ function App() {
     engine.launch()
     engineRef.current = engine
     lastTimeRef.current = 0
-    telemetryLogger.startSession({
-      vehicleId: VEHICLES[vehicleIndex]?.id,
-      params: params as unknown as Record<string, number>,
-    })
     machine.launch()
     setLaunched(true)
     setAbortMessage('')
@@ -312,16 +304,6 @@ function App() {
               <div>{status}</div>
               <div>{JSON.stringify(state)}</div>
               <div>{debug}</div>
-              {/* DEV ONLY — grants write access to the project's logs/ folder
-                  so flight telemetry writes straight to logs/current-flight.log
-                  instead of downloading. Remove before deploying; see
-                  telemetryLogger.ts for why this exists. */}
-              <button
-                type="button"
-                onClick={() => void telemetryLogger.chooseLogFolder()}
-              >
-                Choose logs/ folder for telemetry
-              </button>
             </div>
           )}
         </aside>
