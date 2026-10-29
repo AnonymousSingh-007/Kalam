@@ -455,6 +455,7 @@ export class RocketPhysicsEngine {
   private liftedOff = false
   private railCleared = false
   private outcome: 'flying' | 'landed' | 'crashed' = 'flying'
+  private aborted = false
   private impactSpeed = 0
   private chuteState: 0 | 1 | 2 = 0
   private tDrogue = 0
@@ -525,6 +526,7 @@ export class RocketPhysicsEngine {
     this.liftedOff = false
     this.railCleared = false
     this.outcome = 'flying'
+    this.aborted = false
     this.impactSpeed = 0
     this.chuteState = 0
     this.tDrogue = 0
@@ -567,6 +569,38 @@ export class RocketPhysicsEngine {
     this.rng = mulberry32((Math.random() * 4294967296) >>> 0)
     const sign = this.rng() < 0.5 ? -1 : 1
     this.windScale = sign * (2 + 4 * this.rng())
+  }
+
+  /** Flight termination — cuts thrust immediately and forces main-chute
+   *  deployment, bypassing the normal altitude/speed/dynamic-pressure
+   *  gates in updateChute(). Intended for a watchdog (flightWatchdog.ts)
+   *  that detects runaway telemetry (tumbling, divergent rates) and calls
+   *  this instead of letting the integration keep running into garbage
+   *  numbers. Mirrors a real rocket's flight termination system: kill the
+   *  engine, let aero/chute bring it down — does NOT force-zero rotation,
+   *  since a real FTS doesn't either; the vehicle still has to physically
+   *  stabilize (or not) under drag and chute forces. Idempotent — calling
+   *  it again after an abort is already in progress is a no-op. */
+  abort(): void {
+    if (this.aborted) return
+    if (this.stage === 'pre-launch' || this.outcome !== 'flying') return
+    this.aborted = true
+    this.prop = 0
+    if (this.tBurnout === null) this.tBurnout = this.time
+    // skip the drogue stage — force straight to main chute regardless of
+    // the normal gates (altitude, descent rate, dynamic pressure), since
+    // this is an emergency termination, not a nominal recovery sequence
+    if (this.chuteState !== 2) {
+      this.chuteState = 2
+      this.tDrogue = this.time
+      this.tMain = this.time
+    }
+  }
+
+  /** True once abort() has fired for this flight — UI can show a
+   *  termination banner, telemetry/log consumers can flag the session. */
+  isAborted(): boolean {
+    return this.aborted
   }
 
   step(dt: number): Telemetry {
