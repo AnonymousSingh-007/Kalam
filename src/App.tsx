@@ -5,6 +5,7 @@ import { CountdownMachine } from './state/countdownMachine'
 import { RocketPhysicsEngine, EMPTY_TELEMETRY } from './physics/rocketPhysics'
 import { telemetryLogger } from './physics/telemetryLogger'
 import { checkFlightSanity } from './flightSanity'
+import { checkWatchdog } from './flightWatchdog'
 import { CommentaryEngine } from './commentary/commentaryEngine'
 import { ParamPanel } from './ui/ParamPanel'
 import { InstrumentPanel } from './ui/InstrumentPanel'
@@ -40,6 +41,7 @@ function App() {
   const [showDebug, setShowDebug] = useState(false)
   const [commentary, setCommentary] = useState('')
   const [telemetryDisplay, setTelemetryDisplay] = useState<Telemetry | null>(null)
+  const [abortMessage, setAbortMessage] = useState('')
 
   useEffect(() => {
     machine.onChange(setState)
@@ -144,6 +146,20 @@ function App() {
           telemetryLogger.record(t)
           telemetryLogger.flushIfDone(t)
 
+          // local, rule-based watchdog — no 3rd-party API, just threshold
+          // checks against telemetry the engine already produces. Catches
+          // the control loop losing attitude authority (extreme-TWR
+          // tumbles, runaway rates) and triggers a flight-termination
+          // abort before the integrator produces garbage numbers.
+          if (!engineRef.current.isAborted()) {
+            const verdict = checkWatchdog(t)
+            if (verdict) {
+              engineRef.current.abort()
+              setAbortMessage(verdict.message)
+              setCommentary(`FLIGHT TERMINATION: ${verdict.message}`)
+            }
+          }
+
           const line = commentaryEngineRef.current.tick(t, t.airDensity)
           if (line) setCommentary(line)
 
@@ -209,6 +225,7 @@ function App() {
     })
     machine.launch()
     setLaunched(true)
+    setAbortMessage('')
     commentaryEngineRef.current.reset()
     const snap = engine.snapshot()
     setCommentary(commentaryEngineRef.current.firePreLaunch(snap))
@@ -234,6 +251,20 @@ function App() {
 
       <main className="stage">
         <div className="viewport">
+          {abortMessage && (
+            <div
+              className="abort-banner"
+              role="alert"
+              style={{
+                position: 'absolute', top: 12, left: '50%', transform: 'translateX(-50%)',
+                zIndex: 50, background: '#b00020', color: '#fff', padding: '8px 16px',
+                borderRadius: 6, fontWeight: 700, fontSize: 14, maxWidth: '80%', textAlign: 'center',
+              }}
+            >
+              FLIGHT TERMINATION — {abortMessage}
+            </div>
+          )}
+
           <InstrumentPanel
             telemetry={telemetryDisplay}
             isThrusting={telemetryDisplay?.stage === 'powered-ascent'}
