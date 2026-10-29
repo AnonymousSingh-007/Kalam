@@ -94,6 +94,18 @@ export interface Telemetry {
   gimbalCommand: number    // deg
   finAngle: number         // deg, movable aerodynamic control-fin deflection (+ve = nose-right torque)
 
+  // 6-DOF additions (Phase 1) — pitch-only fields above keep their exact meaning
+  positionZ: number        // m, out-of-plane position (0 when nothing yaws)
+  velocityZ: number        // m/s
+  yawAngle: number         // deg, body yaw from the local frame
+  rollAngle: number        // deg, body roll
+  yawRate: number          // deg/s
+  rollRate: number         // deg/s
+  gimbalYawAngle: number   // deg
+  finYawAngle: number      // deg
+  rcsTorqueYaw: number     // N·m
+  rcsTorqueRoll: number    // N·m
+
   // Vehicle properties
   staticMargin: number     // calibers, (CP - CG) / diameter, low-speed
   centerOfGravity: number  // m from nose
