@@ -205,6 +205,7 @@ export function buildGround(): GroundResult {
         `#include <common>
 uniform vec3 uPlanetCenter;
 uniform float uPlanetRadius;
+uniform float uPatchRadius;
 varying vec3 vSphereNormal;
 varying float vEdgeFade;`)
       .replace('#include <begin_vertex>',
