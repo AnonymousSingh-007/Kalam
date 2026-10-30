@@ -191,23 +191,44 @@ export function buildGround(): GroundResult {
   nearGeo.rotateX(-Math.PI / 2) // flat on XZ
 
   const nearMat = new THREE.MeshStandardMaterial({
-    color: 0xffffff, roughness: 0.95, metalness: 0, transparent: true
+    color: 0xffffff, roughness: 0.95, metalness: 0, transparent: true,
+    // Pull this surface's rasterized depth slightly toward the camera so
+    // it reliably wins the depth test against the coincident globe sphere
+    // beneath it, without moving a single world-space vertex (that's what
+    // the reverted radius-offset attempts got wrong — see the comment in
+    // onBeforeCompile below). Units are implementation-defined slope/bias
+    // factors applied in the rasterizer's own depth-buffer precision, not
+    // world units, so this is unaffected by the ~318,550-unit coordinate
+    // magnitude out here that broke the other approaches.
+    polygonOffset: true,
+    polygonOffsetFactor: -1,
+    polygonOffsetUnits: -4
   })
   nearMat.onBeforeCompile = (shader) => {
     Object.assign(shader.uniforms, uniforms)
     shader.uniforms.uPlanetCenter = { value: planetCenter }
-    // Project the patch onto a radius slightly OUTSIDE the globe's own
-    // radius, in the same world units the projection runs in. The patch's
-    // local `position.y = 0.01` nudge (see where this mesh is created) has
-    // no effect on z-fighting: every vertex's position is overwritten by
-    // this projection, which previously targeted the exact same radius as
-    // the globe sphere, so the two surfaces coincided exactly and the
-    // renderer picked a winner per pixel per frame at random (depth-buffer
-    // noise) -> the flicker. At this radius (~318,550 units) a fixed 0.01
-    // offset is far below float precision at that magnitude, so the patch
-    // is pushed out by a radius-relative amount instead.
-    const patchRadiusOffset = PLANET_RADIUS * 2e-5 // ~6.4 units at Earth scale
-    shader.uniforms.uPlanetRadius = { value: PLANET_RADIUS + patchRadiusOffset }
+    // Project the patch onto the SAME radius as the globe sphere (no
+    // world-space offset here — see the polygonOffset block below for why).
+    //
+    // Two things were tried and reverted before landing on this:
+    //  1. No offset at all (the original bug): the patch and globe vertices
+    //     land at the identical radius, so the rasterizer's depth test ties
+    //     per pixel per frame -> rapid green/brown flicker under the pad.
+    //  2. A radius-relative world-space offset (PLANET_RADIUS * 2e-5,
+    //     ~6.4 units): tiny as a *fraction* of Earth's radius, but still
+    //     ~128 m in absolute scene terms (1 unit = 20 m) -- enough to
+    //     visibly lift the whole patch surface above the pad, making the
+    //     rocket look like it's emerging from a rising ground plane.
+    //     A sub-metre absolute offset (0.05 units) was also tried, but at
+    //     ~318,550 units of magnitude it sits too close to the vertex
+    //     shader's highp-float precision floor to reliably separate the
+    //     two surfaces on all hardware.
+    // The actual fix is GL polygon offset (see nearMat.polygonOffset below):
+    // it nudges the RASTERIZED DEPTH VALUE, not the world-space vertex
+    // position, so it has zero effect on where the patch geometry visually
+    // sits (no ground lift) while still reliably resolving the z-fight,
+    // independent of coordinate magnitude.
+    shader.uniforms.uPlanetRadius = { value: PLANET_RADIUS }
     shader.uniforms.uPatchOpacity = { value: 1.0 }
     shader.uniforms.uPatchRadius = { value: NEAR_PATCH_RADIUS }
 
