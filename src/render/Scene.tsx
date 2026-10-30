@@ -41,7 +41,7 @@ const PLUME_VERTEX = `
 
   void main() {
     vec3 pos = position;
-    float t = clamp(-pos.y, 0.0, 1.0);
+    float t = clamp(-pos.y / 1.5, 0.0, 1.0);
     float machDisc = 1.0 - 0.35 * sin(t * 3.14159 * 3.0) * (1.0 - expansionFactor);
     float baseRadius = t * (0.18 + expansionFactor * 0.55) * machDisc;
     float flutter = 0.018 * sin(time * 8.0 + t * 12.0) * cos(time * 5.5 + t * 7.0);
@@ -567,7 +567,12 @@ export function Scene({ telemetryRef, launched, vehicleId, selecting, quality = 
 
     // ---- Plume ----
     const plumeGeo = new THREE.CylinderGeometry(0, 1, 1.5, 24, 32, true)
-    plumeGeo.rotateX(Math.PI)
+    // Shift so the narrow end (nozzle) sits at y=0 and the wide end
+    // (exhaust) extends to y=-1.5.  No rotateX — the original geometry
+    // already points the right way (narrow top, wide bottom); rotating it
+    // swapped which vertices the shader's t-ramp hit, collapsing the
+    // visible ring to zero radius (the invisible-plume bug).
+    plumeGeo.translate(0, -0.75, 0)
     const plumeMat = new THREE.ShaderMaterial({
       uniforms: { expansionFactor: { value: 0.0 }, time: { value: 0.0 } },
       vertexShader: PLUME_VERTEX, fragmentShader: PLUME_FRAGMENT,
@@ -589,7 +594,7 @@ export function Scene({ telemetryRef, launched, vehicleId, selecting, quality = 
     particleVelocities.current = velocities
     const particleGeo = new THREE.BufferGeometry()
     particleGeo.setAttribute('position', new THREE.BufferAttribute(positions, 3))
-    const particleMat = new THREE.PointsMaterial({ color: 0xffaa33, size: 0.15, transparent: true, opacity: 0.8 })
+    const particleMat = new THREE.PointsMaterial({ color: 0xffaa33, size: 0.35, transparent: true, opacity: 0.85, depthWrite: false, blending: THREE.AdditiveBlending })
     const particles = new THREE.Points(particleGeo, particleMat)
     scene.add(particles); particlesRef.current = particles
 
@@ -823,6 +828,9 @@ export function Scene({ telemetryRef, launched, vehicleId, selecting, quality = 
             const expansionFactor = 1.0 - Math.exp(-telemetry.altitude / 8500)
             plumeMat.uniforms.expansionFactor.value = expansionFactor
             plumeMat.uniforms.time.value = elapsed
+            // Scale plume with altitude: vacuum expansion makes it wider & longer
+            const plumeScale = 1.0 + expansionFactor * 2.5
+            plume.scale.set(plumeScale, plumeScale, plumeScale)
             plume.position.set(r.position.x, r.position.y, r.position.z)
             // Plume is a standalone scene object (not parented to the
             // rocket group), so it needs the full world-space tilt:
@@ -941,7 +949,7 @@ export function Scene({ telemetryRef, launched, vehicleId, selecting, quality = 
         for (let i = 0; i < PARTICLE_COUNT; i++) {
           const idx = i * 3
           if (isThrusting && Math.random() < 0.3) {
-            const exSpeed = Math.random() * 0.1 + 0.05
+            const exSpeed = Math.random() * 0.25 + 0.12
             posAttr.array[idx] = baseX + (Math.random() - 0.5) * 0.25
             posAttr.array[idx + 1] = baseY
             posAttr.array[idx + 2] = (Math.random() - 0.5) * 0.25
