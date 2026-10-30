@@ -71,7 +71,12 @@ const PLUME_FRAGMENT = `
     vec3 coreColor = vec3(1.0, 0.97, 0.88);
     vec3 midColor  = vec3(1.0, 0.55, 0.12);
     vec3 edgeColor = vec3(0.6, 0.15, 0.05);
-    vec3 color = coreColor * core + midColor * mid + edgeColor * edge;
+    // core/mid/edge are independent smoothsteps, not a partition of unity --
+    // they can overlap, so the summed color can exceed (1,1,1) component-wise.
+    // With additive blending across many overlapping plume fragments that
+    // feeds UnrealBloomPass an unbounded HDR spike, not a controlled bright
+    // region. Clamp to a fixed, intentional peak instead.
+    vec3 color = clamp(coreColor * core + midColor * mid + edgeColor * edge, 0.0, 1.6);
     float opacity = (1.0 - vY * 0.85) * (0.9 - expansionFactor * 0.3);
     float rimSoftness = 2.2;
     float edgeFade = 1.0 - pow(vFresnel, rimSoftness);
@@ -299,6 +304,13 @@ export function Scene({ telemetryRef, launched, vehicleId, selecting, quality = 
     renderer.shadowMap.type = THREE.PCFSoftShadowMap
     renderer.toneMapping = THREE.ACESFilmicToneMapping
     renderer.toneMappingExposure = 1.1
+    // Set explicitly rather than relying on the three.js default. OutputPass
+    // is the single place in this chain meant to do the linear -> sRGB
+    // conversion; if outputColorSpace ever diverges from that assumption
+    // (e.g. a future three.js version change, or someone setting it on the
+    // renderer without checking this file), every intermediate pass -- which
+    // all operate on the HDR linear buffer -- silently gets the wrong input.
+    renderer.outputColorSpace = THREE.SRGBColorSpace
     mount.appendChild(renderer.domElement)
 
     // ---- Lighting ----
@@ -628,6 +640,10 @@ export function Scene({ telemetryRef, launched, vehicleId, selecting, quality = 
       vertexShader: HEAT_VERTEX_SHADER,
       fragmentShader: HEAT_FRAGMENT_SHADER
     })
+    // Starts disabled: strength is 0 until a launch happens, and the
+    // pre-launch/selection branch below never updates heatUniforms, so there
+    // is nothing for this pass to do before the first launch.
+    heatPass.enabled = false
     composer.addPass(heatPass)
     composer.addPass(new UnrealBloomPass(new THREE.Vector2(width, height), 1.1, 0.4, 0.8))
 
@@ -640,6 +656,8 @@ export function Scene({ telemetryRef, launched, vehicleId, selecting, quality = 
       vertexShader: CHROMA_VERTEX_SHADER,
       fragmentShader: CHROMA_FRAGMENT_SHADER
     })
+    // Same reasoning as heatPass.enabled above: nothing to do before launch.
+    chromaPass.enabled = false
     composer.addPass(chromaPass)
     composer.addPass(new OutputPass())
 
@@ -870,6 +888,21 @@ export function Scene({ telemetryRef, launched, vehicleId, selecting, quality = 
         const heatTarget = isThrusting ? 0.008 * heatRampUp * heatThinAirFalloff : 0
         heatUniforms.strength.value += (heatTarget - heatUniforms.strength.value) * 0.1
         heatUniforms.time.value = elapsed
+        // Skip the full-screen heat-distortion shader entirely once its
+        // strength has decayed to effectively zero, instead of running it
+        // every frame (including the whole pre-launch/selection screen,
+        // where isThrusting is always false and heatTarget is always 0 --
+        // the pass still executed in full with no visible effect).
+        heatPass.enabled = heatUniforms.strength.value > 0.0005
+        // maskRadius was a fixed 0.35 in normalized screen space, which only
+        // made sense at the old fixed chase distance. With zoom now variable
+        // (chaseOffset.length() changes with userZoom and altitude pullback),
+        // a fixed radius either barely covers the rocket zoomed in or floods
+        // empty sky around it zoomed out. Derive it from the actual current
+        // camera distance so the masked area tracks the rocket's real
+        // on-screen size instead of an arbitrary constant.
+        const camDist = chaseOffset.length()
+        heatUniforms.maskRadius.value = THREE.MathUtils.clamp(2.6 / camDist, 0.08, 0.6)
 
         rocketWorldPos.set(cgX, cgY, r.position.z)
         rocketWorldPos.project(camera)
@@ -883,6 +916,11 @@ export function Scene({ telemetryRef, launched, vehicleId, selecting, quality = 
           0, 1
         )
         chromaUniforms.strength.value = chromaT * chromaT * (3 - 2 * chromaT) * CHROMA_MAX_STRENGTH
+        // Below CHROMA_ALTITUDE_START this is exactly 0; skip the full-screen
+        // pass entirely rather than run a no-op shader every frame (this also
+        // covers the whole pre-launch/selection screen, where this branch
+        // never executes at all and the pass previously ran unconditionally).
+        chromaPass.enabled = chromaUniforms.strength.value > 0.00001
 
         const starT = THREE.MathUtils.clamp(
           (telemetry.altitude - STAR_FADE_START) / (STAR_FADE_FULL - STAR_FADE_START),
