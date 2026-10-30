@@ -653,10 +653,32 @@ export function Scene({ telemetryRef, launched, vehicleId, selecting, quality = 
     const chaseOffset = baseChaseOffset.clone()
     // User-adjustable zoom multiplier: 1 = default, <1 zoomed in, >1 zoomed out.
     // Controlled via scroll wheel; clamped so the user can't lose the rocket.
+    //
+    // The camera looks at the CG (cgX, cgY, ...), but the plume/nozzle sits
+    // at the model's BASE, which is `cgFromBase` units below the CG
+    // (cgFromBase ~= 0.45 * rocketHeight once a vehicle is loaded). At the
+    // old ZOOM_MIN of 0.15, baseChaseOffset's length (~16.6) scaled down to
+    // a camera distance of ~2.5 units -- *less* than that CG-to-nozzle gap,
+    // so the nozzle (and the plume anchored there) fell outside the
+    // frustum below the look-at point: visible zoomed out, gone zoomed in.
+    // Floor userZoom so camera distance at minimum zoom always stays a
+    // healthy multiple of the CG-to-base offset, independent of vehicle
+    // height (rocketHeight is in scope and updated on vehicle swap).
     let userZoom = 1
-    const ZOOM_MIN = 0.15
     const ZOOM_MAX = 6
+    function minZoomForHeight(height: number): number {
+      const cgOffsetEstimate = 0.45 * height
+      const baseOffsetLength = baseChaseOffset.length()
+      // Keep camera distance >= 2x the CG-to-base gap at minimum zoom.
+      const floor = (2 * cgOffsetEstimate) / baseOffsetLength
+      return Math.max(0.15, floor)
+    }
     function updateChaseScale(altitudeSceneUnits: number) {
+      // Re-floor userZoom here (not just on wheel events) so a vehicle
+      // swap that changes rocketHeight can't leave userZoom stuck below
+      // the new minimum (which would re-introduce the clipped-plume bug
+      // without the user having touched the scroll wheel at all).
+      userZoom = Math.max(userZoom, minZoomForHeight(rocketHeight))
       // altitudeSceneUnits is altitude * ALTITUDE_SCALE (0.05).
       // Gentler log ramp than before (×2.5 instead of ×4).
       const altKm = altitudeSceneUnits * 0.02 // 1 unit = 20m = 0.02 km
@@ -668,7 +690,8 @@ export function Scene({ telemetryRef, launched, vehicleId, selecting, quality = 
     renderer.domElement.addEventListener('wheel', (e: WheelEvent) => {
       e.preventDefault()
       const factor = e.deltaY > 0 ? 1.12 : 1 / 1.12
-      userZoom = Math.max(ZOOM_MIN, Math.min(ZOOM_MAX, userZoom * factor))
+      const zoomMin = minZoomForHeight(rocketHeight)
+      userZoom = Math.max(zoomMin, Math.min(ZOOM_MAX, userZoom * factor))
     }, { passive: false })
 
     // ---- Render loop ----
