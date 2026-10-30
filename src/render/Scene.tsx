@@ -77,10 +77,10 @@ const PLUME_FRAGMENT = `
     // feeds UnrealBloomPass an unbounded HDR spike, not a controlled bright
     // region. Clamp to a fixed, intentional peak instead.
     vec3 color = clamp(coreColor * core + midColor * mid + edgeColor * edge, 0.0, 1.6);
-    float opacity = (1.0 - vY * 0.85) * (0.9 - expansionFactor * 0.3);
+    float opacity = (1.0 - vY * 0.7) * (0.95 - expansionFactor * 0.15);
     float rimSoftness = 2.2;
     float edgeFade = 1.0 - pow(vFresnel, rimSoftness);
-    opacity *= mix(0.35, 1.0, edgeFade);
+    opacity *= mix(0.55, 1.0, edgeFade);
     opacity = clamp(opacity, 0.0, 1.0);
     gl_FragColor = vec4(color, opacity);
   }
@@ -580,7 +580,10 @@ export function Scene({ telemetryRef, launched, vehicleId, selecting, quality = 
       blending: THREE.AdditiveBlending
     })
     const plume = new THREE.Mesh(plumeGeo, plumeMat)
-    plume.visible = false; scene.add(plume)
+    plume.visible = false
+    plume.renderOrder = 999
+    plume.frustumCulled = false
+    scene.add(plume)
     plumeRef.current = plume; plumeMaterialRef.current = plumeMat
 
     // ---- Exhaust particles ----
@@ -829,7 +832,10 @@ export function Scene({ telemetryRef, launched, vehicleId, selecting, quality = 
             plumeMat.uniforms.expansionFactor.value = expansionFactor
             plumeMat.uniforms.time.value = elapsed
             // Scale plume with altitude: vacuum expansion makes it wider & longer
-            const plumeScale = 1.0 + expansionFactor * 2.5
+            // as ambient pressure drops. Also keep it visually proportional to
+            // the rocket itself (not just the raw cone size) so it doesn't look
+            // like a tiny spark once the chase camera has pulled back.
+            const plumeScale = (1.0 + expansionFactor * 4.0) * Math.max(rocketRadius / 0.36, 1)
             plume.scale.set(plumeScale, plumeScale, plumeScale)
             plume.position.set(r.position.x, r.position.y, r.position.z)
             // Plume is a standalone scene object (not parented to the
