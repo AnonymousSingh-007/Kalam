@@ -196,7 +196,18 @@ export function buildGround(): GroundResult {
   nearMat.onBeforeCompile = (shader) => {
     Object.assign(shader.uniforms, uniforms)
     shader.uniforms.uPlanetCenter = { value: planetCenter }
-    shader.uniforms.uPlanetRadius = { value: PLANET_RADIUS }
+    // Project the patch onto a radius slightly OUTSIDE the globe's own
+    // radius, in the same world units the projection runs in. The patch's
+    // local `position.y = 0.01` nudge (see where this mesh is created) has
+    // no effect on z-fighting: every vertex's position is overwritten by
+    // this projection, which previously targeted the exact same radius as
+    // the globe sphere, so the two surfaces coincided exactly and the
+    // renderer picked a winner per pixel per frame at random (depth-buffer
+    // noise) -> the flicker. At this radius (~318,550 units) a fixed 0.01
+    // offset is far below float precision at that magnitude, so the patch
+    // is pushed out by a radius-relative amount instead.
+    const patchRadiusOffset = PLANET_RADIUS * 2e-5 // ~6.4 units at Earth scale
+    shader.uniforms.uPlanetRadius = { value: PLANET_RADIUS + patchRadiusOffset }
     shader.uniforms.uPatchOpacity = { value: 1.0 }
     shader.uniforms.uPatchRadius = { value: NEAR_PATCH_RADIUS }
 
@@ -210,7 +221,10 @@ varying vec3 vSphereNormal;
 varying float vEdgeFade;`)
       .replace('#include <begin_vertex>',
         `#include <begin_vertex>
-// Project flat grid vertex onto the planet sphere surface.
+// Project flat grid vertex onto the planet sphere surface, offset
+// slightly outward from the globe's own radius (uPlanetRadius here is
+// PLANET_RADIUS + patchRadiusOffset, not the raw PLANET_RADIUS) so the
+// two meshes never occupy the same depth and cannot z-fight.
 vec3 worldFlat = (modelMatrix * vec4(transformed, 1.0)).xyz;
 vec3 toCenter = worldFlat - uPlanetCenter;
 vec3 dir = normalize(toCenter);
@@ -237,7 +251,10 @@ diffuseColor.a = uPatchOpacity * vEdgeFade;`)
 
   const nearPatch = new THREE.Mesh(nearGeo, nearMat)
   nearPatch.receiveShadow = true
-  nearPatch.position.y = 0.01 // just above the globe surface to prevent z-fight
+  // No local Y offset here: the vertex shader above overwrites `transformed`
+  // completely (projecting onto the sphere), so any local position.y nudge
+  // on this mesh has zero effect on the actual rendered geometry — the
+  // anti-z-fight offset has to live in uPlanetRadius instead (see above).
   nearPatch.renderOrder = 1
   group.add(nearPatch)
 
