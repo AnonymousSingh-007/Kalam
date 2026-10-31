@@ -72,11 +72,19 @@ import * as V3 from './vec3'
 import * as Q from './quat'
 import type { Vec3 } from './vec3'
 import type { Quat } from './quat'
+import { EARTH_RADIUS_M } from '../constants/scale'
 
 // ═══════════════════════════ constants ═══════════════════════════
 
 const G0 = 9.80665
-const R_EARTH = 6_371_000
+// Earth's radius now comes from the single shared constants module
+// (src/constants/scale.ts) instead of a second, independent literal —
+// this file previously declared its own R_EARTH = 6_371_000, identical
+// in value to buildGround.ts's EARTH_RADIUS_M but with nothing enforcing
+// that the two stayed in sync. The constants module has no three.js or
+// DOM dependency, so importing it does not compromise this module's
+// deliberately headless design (see the file's own header comment).
+const R_EARTH = EARTH_RADIUS_M
 const R_ISA = 6_356_766
 const R_AIR = 287.05287
 const GAMMA = 1.4
