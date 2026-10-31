@@ -12,6 +12,7 @@ import { Scene } from './render/Scene'
 import { VehicleSelect } from './ui/VehicleSelect'
 import { VEHICLES } from './render/buildRocket'
 import { GestureDetector } from './hand/gestures'
+import { FixedStepDriver } from './renderInterp'
 import type { CountdownState, Telemetry, RocketParams } from './types'
 import './App.css'
 
@@ -22,7 +23,13 @@ function App() {
   const videoRef = useRef<HTMLVideoElement>(null)
   const trackerRef = useRef<HandTracker | null>(null)
   const engineRef = useRef<RocketPhysicsEngine | null>(null)
+  // Holds the interpolated RenderSnapshot (see renderInterp.ts) that Scene
+  // reads every frame. Shaped exactly like Telemetry, so Scene's existing
+  // `telemetry.xxx` reads are unchanged — only what produces this object
+  // changed (fixed-step physics + lerp/SLERP instead of a raw per-frame
+  // engine.step() result from a second, independent rAF loop).
   const telemetryRef = useRef<Telemetry | null>(null)
+  const driverRef = useRef<FixedStepDriver>(new FixedStepDriver())
   const commentaryEngineRef = useRef<CommentaryEngine>(new CommentaryEngine())
   const gimbalInputRef = useRef<number>(0)
   const rafRef = useRef<number>(0)
@@ -85,6 +92,24 @@ function App() {
     window.addEventListener('keyup', handleKeyUp)
     window.addEventListener('blur', handleBlur)
 
+    // requirement 7: a backgrounded/throttled tab stops getting rAF
+    // callbacks, so `lastTimeRef` goes stale while hidden. Without this,
+    // the first frame after the tab regains visibility would compute a
+    // multi-second (or multi-minute) dt and hand it to the physics driver
+    // in one lump. FixedStepDriver's own MAX_FRAME_DT clamp is a second,
+    // independent guard against that same class of problem (belt and
+    // suspenders), but resetting lastTimeRef here means a resumed tab's
+    // very first frame doesn't even attempt a huge dt — it just resumes
+    // cleanly from "now", losing exactly the wall-clock time the tab was
+    // hidden, which is the correct behavior (the flight pauses with it),
+    // not a stutter or a runaway catch-up burst.
+    function handleVisibilityChange() {
+      if (document.visibilityState === 'visible') {
+        lastTimeRef.current = 0
+      }
+    }
+    document.addEventListener('visibilitychange', handleVisibilityChange)
+
     async function setup() {
       const tracker = new HandTracker()
       await tracker.init()
@@ -134,40 +159,61 @@ function App() {
       if (engineRef.current && timestamp !== undefined) {
         engineRef.current.setGimbalInput(gimbalInputRef.current)
 
+        // Wall-clock time since the previous rAF callback. Deliberately
+        // NOT clamped here to a "reasonable frame" value and handed
+        // straight to the physics engine the way the old dual-loop code
+        // did (Math.min(dt, 1/30)) — that clamp used to silently throw
+        // away time on a slow frame, which is a different bug class from
+        // what FixedStepDriver guards against. The driver's own
+        // MAX_FRAME_DT clamp (renderInterp.ts) is the single place frame
+        // time is bounded now, specifically to handle the
+        // backgrounded-tab/huge-timestep case (requirement 7) without
+        // also quietly losing time on every ordinary slow frame.
         const dt = lastTimeRef.current
           ? (timestamp - lastTimeRef.current) / 1000
           : 1 / 60
         lastTimeRef.current = timestamp
-        telemetryRef.current = engineRef.current.step(Math.min(dt, 1 / 30))
 
-        const t = telemetryRef.current
-        if (t) {
-          // local, rule-based watchdog — no 3rd-party API, just threshold
-          // checks against telemetry the engine already produces. Catches
-          // the control loop losing attitude authority (extreme-TWR
-          // tumbles, runaway rates) and triggers a flight-termination
-          // abort before the integrator produces garbage numbers.
-          if (!engineRef.current.isAborted()) {
-            const verdict = checkWatchdog(t)
-            if (verdict) {
-              engineRef.current.abort()
-              setAbortMessage(verdict.message)
-              setCommentary(`FLIGHT TERMINATION: ${verdict.message}`)
+        const result = driverRef.current.advance(engineRef.current, dt)
+        if (result) {
+          // Single interpolated snapshot for every visual consumer —
+          // Scene.tsx's rocket pose, camera and exhaust all read this one
+          // ref, so they can never disagree about which simulated instant
+          // they're drawing (requirement 4). bodyAngle/yawAngle/rollAngle
+          // here come from quaternion SLERP, not from interpolating the
+          // old Euler-style angles directly (requirement 3); lateralOffset/
+          // altitude/positionZ are plain lerp (requirement 2).
+          telemetryRef.current = result.render
+
+          // Event-detection logic (watchdog, commentary cues, landing)
+          // runs against every *raw* physics tick that actually completed
+          // this frame — never against the interpolated render snapshot,
+          // which can transiently read between two real states (e.g. an
+          // interpolated altitude hovering near 0 right at touchdown) and
+          // would otherwise risk a spurious or delayed trigger.
+          for (const t of result.ticks) {
+            if (!engineRef.current.isAborted()) {
+              const verdict = checkWatchdog(t)
+              if (verdict) {
+                engineRef.current.abort()
+                setAbortMessage(verdict.message)
+                setCommentary(`FLIGHT TERMINATION: ${verdict.message}`)
+              }
             }
-          }
 
-          const line = commentaryEngineRef.current.tick(t, t.airDensity)
-          if (line) setCommentary(line)
+            const line = commentaryEngineRef.current.tick(t, t.airDensity)
+            if (line) setCommentary(line)
 
-          if (t.altitude <= 0 && t.stage === 'descent' && t.time > 1) {
-            setCommentary((prev) =>
-              prev || commentaryEngineRef.current.fireLanded(t)
-            )
+            if (t.altitude <= 0 && t.stage === 'descent' && t.time > 1) {
+              setCommentary((prev) =>
+                prev || commentaryEngineRef.current.fireLanded(t)
+              )
+            }
           }
 
           if (timestamp - lastHudRef.current >= 100) {
             lastHudRef.current = timestamp
-            setTelemetryDisplay({ ...t })
+            setTelemetryDisplay({ ...result.render })
           }
         }
       }
@@ -184,6 +230,7 @@ function App() {
       window.removeEventListener('keydown', handleKeyDown)
       window.removeEventListener('keyup', handleKeyUp)
       window.removeEventListener('blur', handleBlur)
+      document.removeEventListener('visibilitychange', handleVisibilityChange)
       window.clearTimeout(gestureTimerRef.current)
     }
   }, [])
@@ -215,6 +262,10 @@ function App() {
     engine.launch()
     engineRef.current = engine
     lastTimeRef.current = 0
+    // Fresh flight, fresh accumulator — a stale prevPose/currPose pair
+    // from a previous engine instance (or leftover accumulated time) must
+    // never bleed into the first frames of a new launch.
+    driverRef.current.reset()
     machine.launch()
     setLaunched(true)
     setAbortMessage('')
