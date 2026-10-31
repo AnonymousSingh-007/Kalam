@@ -1,4 +1,5 @@
 import * as THREE from 'three'
+import { ALTITUDE_SCALE } from '../constants/scale'
 import type { VehicleId, QualityTier } from '../types'
 
 export type { VehicleId, QualityTier }
@@ -44,7 +45,12 @@ const REALISTIC_HEIGHT_M: Record<VehicleId, number> = {
   tower: 98,   // tall with side boosters (≈SLS class)
   steel: 120,  // bare-metal super-heavy (≈Starship class)
 }
-const HEIGHT_TO_SCENE = 0.05 // same as ALTITUDE_SCALE: metres → scene units
+// Metres-to-scene-units conversion now comes from the single shared
+// constants module (src/constants/scale.ts) — this file previously
+// declared its own independent copy (HEIGHT_TO_SCENE = 0.05) kept in
+// sync with Scene.tsx's and buildGround.ts's own copies only by a code
+// comment, not by the type system.
+const HEIGHT_TO_SCENE = ALTITUDE_SCALE
 
 export interface VehicleModel {
   rocket: THREE.Group
