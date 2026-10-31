@@ -875,7 +875,13 @@ export function Scene({ telemetryRef, launched, vehicleId, selecting, quality = 
             // it look *right*.
             const expansionFactor = 1.0 - Math.exp(-telemetry.altitude / 8500)
             plumeMat.uniforms.expansionFactor.value = expansionFactor
-            plumeMat.uniforms.time.value = elapsed
+            // Simulation time (from the interpolated render snapshot), not
+            // wall-clock `elapsed` — the plume's flutter phase must track
+            // the same timestamp the pose/camera were interpolated at, so
+            // a paused tab or a variable frame rate can't desync the
+            // exhaust's visual turbulence from the instant it's actually
+            // being drawn for.
+            plumeMat.uniforms.time.value = telemetry.time
             // Local-space scale only -- the rocket's own model scale and
             // world transform are already applied by the parent chain, so
             // this is purely "how much does the plume grow relative to
