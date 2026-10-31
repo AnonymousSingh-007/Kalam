@@ -945,6 +945,31 @@ export class RocketPhysicsEngine {
     // ---- rail, pad and ground ----
     this.applyConstraints()
 
+    // Post-abort angular-rate damping. abort() deliberately does NOT
+    // force-zero rotation (see its own comment) because in atmosphere
+    // the vehicle should keep tumbling/stabilizing under real aero and
+    // chute forces, same as a real flight-termination system. But a
+    // watchdog-triggered abort mid-vacuum, high-altitude flight has none
+    // of that: no air, so no aero damping torque, and the chute does
+    // nothing until there's dynamic pressure to bite into — so a runaway
+    // spin the watchdog caught would otherwise continue completely
+    // undamped, forever, exactly as visible as it was the instant it
+    // tripped. That's a simulation gap, not a faithful FTS: a real
+    // vehicle breaking up or losing attitude control doesn't coast at a
+    // constant multi-thousand-deg/s spin indefinitely — structural
+    // breakup, residual venting asymmetry, whatever the real mechanism,
+    // SOMETHING sheds that momentum. Model it as a simple exponential
+    // decay on body-frame angular velocity once aborted, independent of
+    // dynamic pressure, so the tumble visibly winds down instead of
+    // spinning forever. Short time constant (~0.4s to ~1/e) — fast enough
+    // to read as "breaking apart/losing it" within a couple seconds, not
+    // an instant freeze-frame snap.
+    if (this.aborted) {
+      const POST_ABORT_RATE_TAU = 0.4
+      const decay = Math.exp(-h / POST_ABORT_RATE_TAU)
+      s[10] *= decay; s[11] *= decay; s[12] *= decay
+    }
+
     this.maxAltitude = Math.max(this.maxAltitude, s[1])
     this.maxQ = Math.max(this.maxQ, k1.dg.q)
     this.maxMach = Math.max(this.maxMach, k1.dg.mach)
@@ -1060,20 +1085,38 @@ export class RocketPhysicsEngine {
 
         // RCS: pitch/yaw residual (maps to body Z/X axes) plus roll, sharing
         // one finite cold-gas budget (6dof-spec.md §6)
+        //
+        // Torque authority must track the vehicle's CURRENT inertia, not
+        // its launch-time inertia. this.tauRcsMax/tauRcsMaxRoll are frozen
+        // once in init() from the full, fueled mass (kept as-is — they're
+        // also reported by describe() as a vehicle spec) and were being
+        // reused here unchanged for the rest of the flight. As propellant
+        // and RCS gas burn off, actual I/Iyy can shrink by two to three
+        // orders of magnitude toward their floor (massProps' Math.max(...,
+        // 0.5) / Math.max(..., 0.05)), while the torque clamp stayed sized
+        // for the original, much heavier vehicle. The same fixed torque
+        // applied to a much smaller inertia is a proportionally much
+        // larger angular acceleration (tau/I) — exactly the mechanism
+        // behind the observed multi-thousand-deg/s runaway spin late in
+        // flight. Recompute the authority every substep from the current
+        // mp.I/mp.Iyy (already passed in, already up to date) instead.
+        const tauRcsMaxNow = RCS_ACCEL * mp.I
+        const tauRcsMaxRollNow = RCS_ACCEL * mp.Iyy
+
         let tauRcsZ = 0, tauRcsX = 0, tauRcsY = 0
         let gasWanted = 0
-        if (Math.abs(residPitch) > RCS_DEADBAND * this.tauRcsMax && this.rcsGas > 0) {
-          tauRcsZ = clamp(-residPitch, -this.tauRcsMax, this.tauRcsMax)  // -residPitch: tauZ maps to -old pitch torque
+        if (Math.abs(residPitch) > RCS_DEADBAND * tauRcsMaxNow && this.rcsGas > 0) {
+          tauRcsZ = clamp(-residPitch, -tauRcsMaxNow, tauRcsMaxNow)  // -residPitch: tauZ maps to -old pitch torque
           const force = Math.abs(tauRcsZ) / g.rcsCouple
           gasWanted += ((2 * force) / (ISP_COLD * G0)) * h
         }
-        if (Math.abs(residYaw) > RCS_DEADBAND * this.tauRcsMax && this.rcsGas > 0) {
-          tauRcsX = clamp(residYaw, -this.tauRcsMax, this.tauRcsMax)
+        if (Math.abs(residYaw) > RCS_DEADBAND * tauRcsMaxNow && this.rcsGas > 0) {
+          tauRcsX = clamp(residYaw, -tauRcsMaxNow, tauRcsMaxNow)
           const force = Math.abs(tauRcsX) / g.rcsCouple
           gasWanted += ((2 * force) / (ISP_COLD * G0)) * h
         }
-        if (Math.abs(tauNeedRoll) > RCS_DEADBAND * this.tauRcsMaxRoll && this.rcsGas > 0) {
-          tauRcsY = clamp(tauNeedRoll, -this.tauRcsMaxRoll, this.tauRcsMaxRoll)
+        if (Math.abs(tauNeedRoll) > RCS_DEADBAND * tauRcsMaxRollNow && this.rcsGas > 0) {
+          tauRcsY = clamp(tauNeedRoll, -tauRcsMaxRollNow, tauRcsMaxRollNow)
           const force = Math.abs(tauRcsY) / g.rcsCouple
           gasWanted += ((2 * force) / (ISP_COLD * G0)) * h
         }
@@ -1095,7 +1138,10 @@ export class RocketPhysicsEngine {
         finCmdPitch = this.pitchInput * FIN_CTRL_MAX
         finCmdYaw = this.yawInput * FIN_CTRL_MAX
         if (Math.abs(this.rollInput) > 0.01 && this.rcsGas > 0) {
-          tauRcsOut[1] = clamp(this.rollInput * this.tauRcsMaxRoll, -this.tauRcsMaxRoll, this.tauRcsMaxRoll)
+          // Same current-inertia fix as the assisted branch above — don't
+          // use the frozen launch-time this.tauRcsMaxRoll here either.
+          const tauRcsMaxRollNow = RCS_ACCEL * mp.Iyy
+          tauRcsOut[1] = clamp(this.rollInput * tauRcsMaxRollNow, -tauRcsMaxRollNow, tauRcsMaxRollNow)
           const force = Math.abs(tauRcsOut[1]) / g.rcsCouple
           rcsUsed = Math.min(((2 * force) / (ISP_COLD * G0)) * h, this.rcsGas)
         }
