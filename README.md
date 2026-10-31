@@ -35,6 +35,7 @@ Physics comes first. The renderer is a view of the telemetry stream; it never fe
 - **Gesture-driven pre-launch.** In-browser hand landmark detection drives the whole pre-flight sequence: swipe to browse vehicles, clap to confirm, then a finger count (5, 4, 3, 2, 1, fist) steps the state machine `idle -> selecting -> counting -> armed -> launched`. Keyboard and on-screen controls work as fallbacks.
 - **Four selectable vehicles.** Four original, fully procedural launch-vehicle models (no image or model files), in three quality tiers with automatic step-down on slow GPUs. Vehicles are cosmetic for now: they share one flight model.
 - **Full 6-DOF rigid-body physics.** State is a 13-scalar vector — position, velocity, orientation quaternion and body-frame angular velocity — integrated with RK4 in sub-steps of at most 5 ms, with quaternion renormalization every step. Pitch, yaw and roll are all independently modelled, with real gyroscopic coupling between axes.
+- **Fixed-step physics decoupled from render rate.** A `1/120 s` accumulator (`renderInterp.ts`) advances the simulation independently of the display's actual frame rate, and every visual consumer — rocket pose, chase camera, exhaust plume — reads one interpolated snapshot per paint, built with linear interpolation on position and quaternion SLERP on orientation. A backgrounded or throttled tab cannot hand the simulation a huge timestep on resume.
 - **Spherical gravity.** True inverse-square gravity toward a planet centre sitting below the pad, resolved in all three dimensions, so lateral and out-of-plane drift both correctly tilt gravity toward the true centre instead of pointing straight down.
 - **ISA 1976 atmosphere** (seven layers, chained base pressures, density from the ideal-gas law, geopotential altitude) with an altitude wind profile and mean-reverting gusts. Aerodynamics use air-relative velocity.
 - **Geometry derived from the launch parameters.** Reference area sets diameter and length; nose, fins, centre of gravity, centre of pressure, inertia and static margin all follow from it.
@@ -50,7 +51,7 @@ Physics comes first. The renderer is a view of the telemetry stream; it never fe
 - **Realistic per-vehicle scale.** Each of the four vehicles is scaled to a distinct real-world height (50 to 120 m) instead of sharing one arbitrary size, so they read as different classes of rocket against the true-scale planet.
 - **User zoom control.** The scroll wheel adjusts a zoom multiplier on top of the automatic altitude pullback.
 - **Live instruments** for altitude, velocity, axial g, angle of attack, Mach, dynamic pressure, cold-gas remaining and nozzle deflection.
-- **Telemetry-aware commentary**, spoken with the Web Speech API.
+- **Mission-control-style spoken commentary**, triggered by flight stage and telemetry thresholds and read aloud with the Web Speech API. Lines are fixed, pre-written technical callouts rather than readouts of live numbers, and queue rather than interrupt each other so each one finishes.
 
 ---
 
@@ -65,19 +66,35 @@ Physics comes first. The renderer is a view of the telemetry stream; it never fe
                                                      v
  launch parameters --> checkFlightSanity() --> RocketPhysicsEngine.launch()
                                                      |
- arrow keys --> setGimbalInput(-1..+1) --> step(dt) --+--> Telemetry snapshot
-                                                          |        |        |
-                                                          v        v        v
-                                                   checkWatchdog()  Scene   commentary
-                                                   (abort if tripped) (Three.js) (speech)
-                                                          |             |
-                                                          v             v
-                                                   instruments (HUD)
+                                      FixedStepDriver.advance(engine, frameDt)
+                                                     |
+                                   accumulator drains at FIXED_DT = 1/120 s
+                                                     |
+                                engine.step(FIXED_DT)  (0 or more raw ticks)
+                                                     |
+                              +----------------------+----------------------+
+                              |                                             |
+                              v                                             v
+                       raw ticks[]                           lerp(position) + SLERP(quat)
+                  (watchdog, commentary,                      between the last two ticks
+                   landing/crash detection)                               |
+                              |                                            v
+                              v                                  interpolated RenderSnapshot
+                       checkWatchdog()                          (rocket pose + camera + exhaust
+                       (abort if tripped)                        all read this one object)
+                                                                            |
+                                                                            v
+                                                                    Scene (Three.js)
+                                                                            |
+                                                                            v
+                                                                    instruments (HUD)
 ```
 
-- `App.tsx` owns the loop. Each animation frame it runs hand detection, advances the countdown machine, passes the held arrow-key state to the engine, calls `engine.step(min(dt, 1/30))`, checks the resulting telemetry against the local watchdog, and publishes the `Telemetry` object by ref (to the renderer) and by throttled React state (to the HUD, refreshed every 100 ms of wall-clock time so the final landed-or-crashed frame is never skipped).
-- The engine is a plain TypeScript class with no DOM, React or three.js dependency — `vec3.ts` and `quat.ts` are small hand-rolled math primitives so the physics module stays headless and can be driven from a script for validation.
-- Telemetry is the only contract between the engine and everything else. Values are rounded to 0.01 only when the snapshot is taken; internal state stays in full double precision.
+- `App.tsx` owns a single `requestAnimationFrame` loop — hand detection, the countdown machine, the arrow-key state, and physics all run from it. Physics itself is driven by `FixedStepDriver` (`renderInterp.ts`), not by calling `engine.step()` once per paint: each frame, wall-clock `frameDt` is fed into an accumulator and drained in fixed `1/120 s` ticks, so the simulation always advances at a constant rate independent of the display's actual frame rate. A backgrounded or throttled tab cannot hand the accumulator a multi-second jump either — `frameDt` is clamped before it's added, and a `visibilitychange` listener resets the frame-time baseline on resume, so time lost while hidden is simply not simulated rather than replayed as a burst of catch-up ticks.
+- Every raw physics tick that actually ran in a frame is collected and handed, unmodified, to event-detection logic (the watchdog, commentary triggers, landing/crash detection) — these need a real simulated instant, not something smoothed between two states. Separately, the driver builds one interpolated `RenderSnapshot` per paint from the last two ticks: position fields (`lateralOffset`, `altitude`, `positionZ`) are linearly interpolated, and orientation is SLERPed on the engine's raw quaternion (via a new `poseSnapshot()` accessor) rather than on the already-decomposed `bodyAngle`/`yawAngle`/`rollAngle` — SLERP on the true orientation avoids the wrong-way-around artifacts that interpolating separate Euler-style angles can produce near a wrap. `bodyAngle`/`yawAngle`/`rollAngle` in the render snapshot are then re-derived from the interpolated quaternion, not interpolated directly. Every other telemetry field (thrust, mass, stage, HUD numbers, `outcome`, …) is simply the latest tick's value — only the spatial pose benefits from smoothing.
+- This `RenderSnapshot` is what gets published by ref to `Scene.tsx` and by throttled React state to the HUD (refreshed every 100 ms of wall-clock time so the final landed-or-crashed frame is never skipped). Because the rocket's render pose, the chase camera, and the exhaust plume's shader `time` uniform are all read from this one object each frame, they can never disagree about which simulated instant they're drawing — previously the physics loop and the render loop were two independent `requestAnimationFrame` callbacks reading a shared mutable ref with no ordering guarantee between them, which was a source of visible jitter.
+- The engine is a plain TypeScript class with no DOM, React or three.js dependency — `vec3.ts` and `quat.ts` are small hand-rolled math primitives so the physics module stays headless and can be driven from a script for validation. `renderInterp.ts` is the one place that bridges the headless engine and three.js (it uses `THREE.Quaternion.slerp` directly), by design — the physics module itself never imports three.js.
+- Telemetry is the only contract between the engine and everything else. Values are rounded to 0.01 only when `snapshot()` is taken; internal state stays in full double precision. The new `poseSnapshot()` accessor is additive — it exposes the raw, unrounded position and orientation quaternion alongside `snapshot()`, purely for the interpolation driver; it does not change `Telemetry` or anything `snapshot()` returns.
 
 ---
 
@@ -273,10 +290,14 @@ When the watchdog trips, `App.tsx` calls `engine.abort()`:
 
 - Propellant is set to zero — thrust cuts immediately (subject to the normal tail-off ramp, same as a nominal burnout).
 - The parachute is forced straight to the main-canopy stage, bypassing the normal altitude/dynamic-pressure/descent-rate gates, since this is an emergency termination, not a nominal recovery sequence.
-- Rotation itself is **not** force-zeroed — a real flight termination system doesn't reset the vehicle's attitude either; it just kills the engine and lets aerodynamic drag and the chute bring things back under control, which is exactly what happens here.
+- Rotation itself is **not** instantly force-zeroed — `abort()` still doesn't reset the vehicle's attitude in one frame, matching how a real flight termination system behaves: it kills the engine and lets aerodynamic drag and the chute bring things back under control. But that assumption only holds where there's air to provide that damping. A watchdog-triggered abort at high altitude or in the thin/vacuum regime has no aerodynamic torque to rely on, so once `aborted` is set, every subsequent physics sub-step applies an exponential decay (`~0.4 s` time constant) directly to body-frame angular velocity, independent of dynamic pressure. The tumble visibly winds down over roughly a second or two instead of continuing at a constant rate indefinitely — modelling the idea that a vehicle that has lost attitude control doesn't coast forever at whatever rate it was spinning at the moment of termination, without faking an instant, unrealistic freeze.
 - `engine.isAborted()` reports the termination so the UI can show a banner; the call is idempotent, so a watchdog that keeps tripping on subsequent frames does nothing further.
 
 This mirrors a real rocket's flight termination system in spirit: watch a small set of flight-safety signals, and if one crosses a hard limit, cut thrust and trigger recovery before things get worse — entirely offline, entirely deterministic, with no model or network call in the loop.
+
+### RCS torque authority and vehicle mass
+
+The cold-gas thrusters' torque authority (`tauRcsMax`, `tauRcsMaxRoll`) is a vehicle spec computed once at launch from the full, fueled mass, and is still reported as such by `describe()`. Inside the flight computer's control allocation, though, that authority is now recomputed every sub-step from the vehicle's *current* inertia (`mp.I`/`mp.Iyy`), not reused from the frozen launch-time value. Inertia shrinks — potentially by two to three orders of magnitude — as propellant and cold-gas mass burn off toward the structural floor; applying torque sized for the original, much heavier vehicle to the now much lighter one is a proportionally much larger angular acceleration (`tau / I`), which is exactly the mechanism that could previously spin a nearly-dry vehicle up to multiple thousands of degrees per second within well under a second, even with the watchdog's own thresholds (2,000 deg/s per axis) tuned to catch a runaway early. Recomputing the clamp against live inertia keeps commanded torque proportionate to the vehicle actually being controlled at that instant.
 
 ---
 
@@ -304,7 +325,7 @@ This mirrors a real rocket's flight termination system in spirit: watch a small 
 
 ## Rendering
 
-The renderer reads the telemetry ref each frame. It contains no physics.
+The renderer reads the interpolated `RenderSnapshot` ref each frame (see [Architecture and data flow](#architecture-and-data-flow)). It contains no physics.
 
 - **Scale.** Altitude and lateral offset are multiplied by `ALTITUDE_SCALE = 0.05`, so one scene unit represents 20 m. The planet, sky dome, starfield and camera far plane are all built at this same true scale (see Planet, below); the launch pad and support structure are drawn at a larger, cinematic scale so they stay legible up close.
 - **Logarithmic depth buffer.** The renderer is created with `logarithmicDepthBuffer: true`. A linear depth buffer cannot represent both a few-metre rocket and a 318,550-unit-radius planet in one range without z-fighting; the log buffer resolves the full span from 0.1 to 800,000 scene units. `CloudPass` decodes depth accordingly (`viewZ = exp2(depth * log2(far + 1)) - 1`) instead of the standard linear formula.
@@ -313,13 +334,11 @@ The renderer reads the telemetry ref each frame. It contains no physics.
 - **Rocket models.** Four vehicles are built by `buildVehicle(id, quality, envMap)` in `buildRocket.ts`. Bodies, domes, ogives and engine bells are lathe-revolved profiles; fins are bevelled extrusions; struts are cylinders; rivets are instanced spheres. All static parts are merged into one mesh per material, so a vehicle costs roughly 9 draw calls. A small shader patch adds per-pixel panel seams, exhaust soot, and low-frequency mottling, with no textures. Materials are PBR and use the scene environment map; the high tier adds clearcoat on painted surfaces and rivets. Tone mapping is ACES filmic. The nozzle group pivots at the engine mount, so the gimbal animation is the same for every vehicle. After building, each model is uniformly scaled so its bounding-box height matches a realistic real-world height for that vehicle class (K-1 Strap 50 m, K-2 Reuse 70 m, K-3 Tower 98 m, K-4 Steel 120 m), converted to scene units; the `height` returned to the scene is measured after scaling, so centre-of-gravity placement and chute position are unaffected.
 - **Quality tiers.** `low`, `medium`, `high` change radial segment counts, clearcoat, soot and mottle detail, rivets and fin bevels. Measured with all four vehicles in one scene: low 36 draw calls / 20k triangles, medium 36 / 33k, high 40 / 82k (only one vehicle is ever shown at a time). While on the pad, if the average frame time exceeds about 33 ms over 90 frames, the scene rebuilds the vehicle one tier lower.
 - **Launch complex.** Textured pad, support legs, flame deflector, hold-down arms, tower, scorch decal. At ignition a dual-sided flame-trench shader fans out horizontally and a ground ignition cloud billows independent of rocket altitude.
-- **Plume.** A shader-deformed cone whose radius follows an expansion factor `1 - exp(-altitude / 8500 m)`: shock-disc structure at sea level, widening to a vacuum cone with altitude. Fresnel rim fade softens the silhouette. Exhaust particles are spawned at the nozzle and travel opposite to the body axis, so they follow the rocket through a flip.
+- **Plume.** A shader-deformed cone whose radius follows an expansion factor `1 - exp(-altitude / 8500 m)`: shock-disc structure at sea level, widening to a vacuum cone with altitude. Fresnel rim fade softens the silhouette. The plume mesh is parented directly to the rocket model's own `nozzleGroup` (the same group the gimbal animation pivots), rather than kept as a standalone scene object whose position, rotation and scale were synced by hand every frame — as a real child, it inherits the nozzle's world position, gimbal tilt and the vehicle's own model scale automatically through three.js's matrix stack, and a vehicle swap re-parents it onto the new model's `nozzleGroup` instead of leaving it attached to a disposed one. It is also marked `frustumCulled = false`, since a mesh whose scale and position change every frame can go stale against its cached bounding sphere and get incorrectly culled once the camera has moved far enough. The flutter/turbulence `time` uniform is driven by the simulation's own interpolated time (not wall-clock), so the exhaust stays visually in sync with whichever instant the pose and camera are drawn for. Exhaust particles are spawned at the nozzle and travel opposite to the body axis, so they follow the rocket through a flip; once spawned, a particle only integrates its own stored world-space position and velocity and is never re-anchored to the rocket, so it keeps its own trajectory independent of the vehicle's later motion.
 - **Planet.** True Earth radius: 6,371 km, scaled to 318,550 scene units. Two meshes share one set of noise-based colour uniforms: a coarse globe sphere (256 x 128 segments) visible from orbital altitude and used as the natural horizon, and a high-resolution near patch — a 160 x 160 flat grid covering a 20 km radius, each vertex projected onto the sphere surface in the vertex shader for metre-scale ground detail close to the pad, fading out between 8,000 m and 40,000 m as the coarse globe takes over. Colour comes from five-octave domain-warped 3D noise evaluated on the sphere normal: ocean, coastal foam, sand, lowland, highland and rock bands, biased so the launch site is always on land. Because only colour varies and the near patch is projected onto the same sphere radius as the globe, the physics ground (`py = 0`) always matches what is drawn. White cloud patches fade in on the globe from 300 to 4,000 m. A back-faced, additive atmosphere shell (80 km thick) supplies the blue limb glow from orbit.
 - **Sky and stars.** Three-stop gradient dome, radius 600,000 scene units. 2,000 stars on a 500,000-unit shell fade in between 5 and 15 km altitude. There is no scene fog — at true planetary scale, fog would hide the globe entirely — so haze is handled by the atmosphere shell and cloud layers instead.
 - **Volumetric clouds.** Three layers (stratus 0 to 600 m, cumulus 600 m to 2 km, cirrus 6 to 12 km) raymarched against a gradient and cellular noise volume with exponential extinction and height-based colour, composited via the log-depth-aware `CloudPass`.
 - **Post-processing.** Heat scintillation pass masked around the rocket (peaks near 1,200 m, decays with an 8.5 km scale height), bloom, chromatic aberration ramping from 6 to 15 km, output pass.
-
-**Known shader issue.** The near-patch ground shader currently fails to compile (`'uPatchRadius' : undeclared identifier`), which breaks the planet render. This is tracked separately from the 6-DOF work and is not yet fixed — see Known limitations.
 
 ---
 
@@ -364,9 +383,10 @@ idle -> selecting -> counting(expected, heldFrames) -> armed -> launched
 ## Commentary engine
 
 - Rule-based trigger engine with 12 trigger types: `countdown`, `pre-launch`, `ignition`, `max-q`, `burnout`, `coast`, `apogee`, `descent`, `landed`, `high-g`, `high-aoa`, `fast-descent`.
-- Stage-transition triggers fire once on entry. Event triggers (high g, steep angle of attack, fast descent) fire when telemetry crosses a threshold. Periodic lines fill long coast and descent phases. The engine is given the live air density each tick.
-- Lines are templates filled with live telemetry values. A 12-entry no-repeat ring buffer prevents the same line twice in a row.
-- Speech uses the Web Speech API (`rate 1.05`, `pitch 0.9`); the currently spoken line is cancelled when a new one fires.
+- Stage-transition triggers fire once on entry. Event triggers (high g, steep angle of attack, fast descent) fire when telemetry crosses a threshold. Periodic lines fill long coast and descent phases, and a shorter interval keeps lines going through the burn as well. The engine is given the live air density each tick for max-Q detection.
+- Lines are fixed, pre-written mission-control-style callouts (`lines.ts`) — plain technical language ("Main engine cutoff. Propellant depleted.", "Max-Q. Vehicle is now through the period of peak aerodynamic load.") describing what's happening, not readouts of the instrument panel's own numbers. No line reads a live telemetry value into its wording; the HUD already shows those continuously, so a callout states the event rather than repeating a gauge. A 12-entry no-repeat ring buffer prevents the same line twice in a row, falling back to the full set for that trigger if every option has recently been used.
+- `CommentaryEngine.tick()` returns `{ text, important }` rather than a bare string. `important` is true for stage transitions, max-Q, and threshold events — one-shot moments worth not losing — and false for periodic filler, where another line follows within a few seconds regardless.
+- Speech uses the Web Speech API (`rate 1.05`, `pitch 0.9`). A new line no longer cancels whatever is currently being spoken — `speechSynthesis.speak()` queues on its own, so each line is allowed to finish. `App.tsx` also gates what commentary.tick() returns against `speechSynthesis.speaking`: while something is still being read, periodic filler is dropped (there'll be another one shortly), but an `important` line is held in a one-slot pending queue and surfaced the instant speech frees up, so a real flight event is never silently lost — only delayed enough to let the previous line finish. A flight-termination message is the one exception that still interrupts immediately, since a safety banner overriding whatever's mid-sentence is the correct behaviour. A fresh launch does call `speechSynthesis.cancel()` once, so nothing left over from a previous flight bleeds into the next one.
 
 ---
 
@@ -412,7 +432,7 @@ Validation performed headlessly against the engine:
 - **Stability across configurations.** Nominal (no key input) flights land softly for all five parameter sets, including one that reaches Mach 2.6. Realistic thrust-to-weight configurations (1.8 to 6.4) under continuous aggressive pitch/yaw stick input stayed numerically stable (no non-finite values, no runaway rates) through thousands of integration steps; low/mid thrust-to-weight configurations under sustained hard maneuvering crashed, which is expected rocket behaviour under those inputs rather than a stability bug.
 - **Cold-gas-only pitch.** At low dynamic pressure the cold-gas couple alone achieves the commanded 30 deg/s using about 0.07 kg of gas.
 - **Parachute swing.** Pendulum motion under canopy settles in about 4 s.
-- **Watchdog verification.** Replaying the exact parameter set that produced a real control-loop runaway (thrust 992,200 N against a 535 kg vehicle, thrust-to-weight around 190) with sustained yaw input: the watchdog tripped at t=3.03 s on an angular-rate-runaway verdict (yaw rate past -2,000 deg/s), thrust fell to zero within roughly 0.3 s via the tail-off ramp, the main chute deployed immediately, yaw rate collapsed from the thousands of deg/s down to the tens within about 2 s, and altitude settled into a stable, slowly descending state — no non-finite values were reached at any point after the abort.
+- **Watchdog verification.** Replaying the exact parameter set that produced a real control-loop runaway (thrust 992,200 N against a 535 kg vehicle, thrust-to-weight around 190) with sustained yaw input: the watchdog tripped at t=3.03 s on an angular-rate-runaway verdict (yaw rate past -2,000 deg/s), thrust fell to zero within roughly 0.3 s via the tail-off ramp, and the main chute deployed immediately. At the time this entry was first written, the post-abort rate decay described here was the intended behaviour but was not yet actually implemented — in practice an abort triggered high in the flight (thin/vacuum air, little aerodynamic damping) could leave the vehicle tumbling at its termination-time rate indefinitely, since nothing in `abort()` reduced angular velocity and there was no air to do it passively. Two fixes landed together to close that gap: the cold-gas torque-authority staleness bug described just above (the actual root cause of rates reaching the multi-thousand-deg/s range at all in a near-dry vehicle), plus an explicit post-abort angular-rate decay in the integrator (see [Flight safety](#flight-safety-sanity-checks-and-the-watchdog)) so a tumble that does occur winds down within a couple of seconds regardless of altitude, rather than persisting. With both in place, yaw rate collapsing from the thousands of deg/s down to the tens within about 2 s and altitude settling into a stable, slowly descending state is the actual, verified post-abort behaviour, not just the design intent.
 
 ---
 
@@ -431,7 +451,6 @@ Validation performed headlessly against the engine:
 - **The control fins are modelled in the physics and reported in telemetry** (`finAngle`, `finYawAngle`) but are not yet animated on the 3D model.
 - **Left/right arrow input commands a pitch *rate*, not lateral translation.** Because the attitude-hold loop re-centres pitch quickly and lateral drift is a second-order, lagged consequence of thrust/drag tilt (not a direct force), a short tap reads mostly as the nose tipping rather than as sideways motion — the vehicle does genuinely drift sideways once the tilt has had time to act on its mass, matching real gravity-turn behaviour, but it is not an arcade-style strafe.
 - **Launch parameters are not yet clamped to per-vehicle or physically plausible ranges.** The pre-launch sanity check (see [Flight safety](#flight-safety-sanity-checks-and-the-watchdog)) warns on extreme thrust-to-weight, burn time or geometry, but does not block launch — at the extremes, the control loop can still lose attitude authority, which is what the in-flight watchdog's abort sequence exists to catch.
-- **The near-patch ground shader currently fails to compile** (`'uPatchRadius' : undeclared identifier` in the vertex shader), which breaks the planet render. This is a separate, open issue from the 6-DOF physics work and is not yet fixed.
 
 ---
 
@@ -469,6 +488,7 @@ src/
 ├── types.ts                    # Shared data shapes: hand types, countdown state, vehicle ids, rocket params, telemetry, commentary
 ├── flightSanity.ts             # Pre-launch check: flags extreme thrust-to-weight, burn time, or geometry before launch
 ├── flightWatchdog.ts           # In-flight check: local rule-based detection of a runaway control loop
+├── renderInterp.ts             # Fixed-step physics accumulator + lerp/SLERP render-state interpolation
 ├── hand/
 │   ├── handTracker.ts          # Hand landmark detector wrapper (two hands)
 │   ├── fingerCount.ts          # Landmark-based finger count (0-5)
@@ -487,13 +507,13 @@ src/
 │   └── CloudPass.ts            # Volumetric cloud post-process pass (stratus, cumulus, cirrus), log-depth aware
 ├── commentary/
 │   ├── commentaryEngine.ts     # Stage-transition and event trigger logic
-│   └── lines.ts                # Line bank: telemetry-aware templates for all triggers
+│   └── lines.ts                # Line bank: fixed mission-control-style callouts for all triggers, no live telemetry in the text
 ├── ui/
 │   ├── VehicleSelect.tsx       # Vehicle picker overlay (name card, arrows, confirm)
 │   ├── VehicleSelect.css
 │   ├── ParamPanel.tsx          # Launch parameter inputs with live derived stats
 │   └── InstrumentPanel.tsx     # Gauges: altitude, velocity, axial g, AoA, Mach, q, cold gas, nozzle deflection
-└── App.tsx                     # Pipeline: webcam -> hand -> sanity check -> physics -> watchdog -> render -> commentary
+└── App.tsx                     # Pipeline: webcam -> hand -> sanity check -> fixed-step physics -> watchdog -> render -> commentary
 ```
 
 ---
@@ -517,7 +537,8 @@ The values below live at the top of `rocketPhysics.ts` unless noted otherwise.
 | `FIN_CTRL_MAX` / `FIN_CTRL_RATE` / `FIN_CTRL_TAU` / `FIN_CTRL_EFF` | 15 deg / 80 deg/s / 0.03 s / 0.75 | Control-fin actuator and effectiveness, pitch and yaw |
 | `OMEGA_MAX` | 30 deg/s | Commanded rate at full key deflection, per axis |
 | `K_THETA` / `K_OMEGA` | 1.8 / 6.0 per s | Attitude-hold and rate loop gains, all three axes |
-| `RCS_ACCEL` / `RCS_DEADBAND` / `ISP_COLD` | 30 deg/s^2 / 4 percent / 65 s | Cold-gas couple, shared budget across pitch/yaw/roll |
+| `RCS_ACCEL` / `RCS_DEADBAND` / `ISP_COLD` | 30 deg/s^2 / 4 percent / 65 s | Cold-gas couple, shared budget across pitch/yaw/roll. `RCS_ACCEL` is combined with the vehicle's *current* inertia every sub-step to set the live torque clamp, not a value frozen at launch |
+| `POST_ABORT_RATE_TAU` | 0.4 s | Exponential time constant for angular-velocity decay once `aborted` is set — only active post-termination, independent of dynamic pressure |
 | `STRUCT_CG` / `PROP_CG` / `PROP_LEN` / `RCS_TANK` / `RCS_ARM` | 0.62 / 0.45 / 0.40 / 0.12 / 0.60 | Mass station fractions of length |
 | `GUST_TAU` | 3.0 s | Gust correlation time |
 | `MAX_SUB_DT` | 1/200 s | Integrator sub-step |
