@@ -35,13 +35,17 @@ const STAR_MAX_OPACITY = 0.9
 const PLUME_VERTEX = `
   uniform float expansionFactor;
   uniform float time;
+  uniform float plumeLen;
   varying float vY;
   varying float vRadius;
   varying float vFresnel;
 
   void main() {
     vec3 pos = position;
-    float t = clamp(-pos.y / 1.5, 0.0, 1.0);
+    // Geometry now lives at local y in [-plumeLen, 0]: tip (throat, radius
+    // 0) at y=0, trailing bell at y=-plumeLen. t=0 at the throat, t=1 at
+    // the far end of the exhaust trail.
+    float t = clamp(-pos.y / plumeLen, 0.0, 1.0);
     float machDisc = 1.0 - 0.35 * sin(t * 3.14159 * 3.0) * (1.0 - expansionFactor);
     float baseRadius = t * (0.18 + expansionFactor * 0.55) * machDisc;
     float flutter = 0.018 * sin(time * 8.0 + t * 12.0) * cos(time * 5.5 + t * 7.0);
@@ -538,6 +542,15 @@ export function Scene({ telemetryRef, launched, vehicleId, selecting, quality = 
     chuteRef.current = chute
 
     const swapVehicle = (id: VehicleId, q: QualityTier) => {
+      // The plume is a child of nozzleGroup (see "---- Plume ----" below),
+      // so pull it out before the old model (and its nozzleGroup) gets
+      // disposed, or it would be destroyed along with the vehicle it's
+      // leaving. Three.js's add() on a new parent reparents in place --
+      // no geometry/material recreation needed, so this is cheap and
+      // keeps the shader uniforms (expansionFactor, time) untouched.
+      const plume = plumeRef.current
+      if (plume) scene.add(plume)  // temporary parent so it survives the old model's disposal
+
       if (model) {
         model.rocket.remove(chute)
         scene.remove(model.rocket)
@@ -554,6 +567,8 @@ export function Scene({ telemetryRef, launched, vehicleId, selecting, quality = 
       chute.position.y = rocketHeight + 0.3
       chute.visible = false
       rocket.add(chute)
+
+      if (plume) model.nozzleGroup.add(plume)
     }
     swapRef.current = swapVehicle
     swapVehicle(vehicleRef.current, qualityRef.current)
@@ -566,15 +581,33 @@ export function Scene({ telemetryRef, launched, vehicleId, selecting, quality = 
     let lastFrameT = performance.now()
 
     // ---- Plume ----
-    const plumeGeo = new THREE.CylinderGeometry(0, 1, 1.5, 24, 32, true)
-    // Shift so the narrow end (nozzle) sits at y=0 and the wide end
-    // (exhaust) extends to y=-1.5.  No rotateX — the original geometry
-    // already points the right way (narrow top, wide bottom); rotating it
-    // swapped which vertices the shader's t-ramp hit, collapsing the
-    // visible ring to zero radius (the invisible-plume bug).
-    plumeGeo.translate(0, -0.75, 0)
+    // Parented directly to the nozzle group (a real child in the rocket's
+    // local space), not a standalone scene object synced by hand every
+    // frame. This was the actual source of the "visible at liftoff, gone
+    // later" bug: a free-floating mesh repositioned/rescaled each frame
+    // fights Three.js's cached world-matrix/bounding-sphere bookkeeping,
+    // and any one-frame desync (vehicle swap, a skipped frame under load,
+    // the camera's logarithmic pullback outrunning a hand-rolled scale
+    // curve) makes it drift off screen or get frustum-culled. As a child
+    // of nozzleGroup it inherits position, gimbal rotation AND the
+    // rocket's own model scale automatically and exactly, every frame,
+    // with zero hand-sync code — it physically cannot end up anywhere
+    // other than "at the nozzle", which is also physically correct: the
+    // exhaust plume's whole job is to trail from the engine bell.
+    //
+    // Geometry: nozzleMountY is near the base of the rocket group (local
+    // space, +Y up), so the plume must point further in -Y (downward, out
+    // the back of the engine). CylinderGeometry(radiusTop, radiusBottom,
+    // height) places radiusTop at local +height/2 and radiusBottom at
+    // local -height/2. We want radius 0 (the throat) at local y=0 and the
+    // widening exhaust trailing to y=-PLUME_LEN, so: radiusTop=0,
+    // radiusBottom=1, then translate up by +height/2 so the tip sits at
+    // y=0 exactly, with the bell of the cone hanging below it.
+    const PLUME_LEN = 2.2
+    const plumeGeo = new THREE.CylinderGeometry(0, 1, PLUME_LEN, 24, 32, true)
+    plumeGeo.translate(0, PLUME_LEN / 2, 0)
     const plumeMat = new THREE.ShaderMaterial({
-      uniforms: { expansionFactor: { value: 0.0 }, time: { value: 0.0 } },
+      uniforms: { expansionFactor: { value: 0.0 }, time: { value: 0.0 }, plumeLen: { value: PLUME_LEN } },
       vertexShader: PLUME_VERTEX, fragmentShader: PLUME_FRAGMENT,
       transparent: true, depthWrite: false, side: THREE.DoubleSide,
       blending: THREE.AdditiveBlending
@@ -583,7 +616,8 @@ export function Scene({ telemetryRef, launched, vehicleId, selecting, quality = 
     plume.visible = false
     plume.renderOrder = 999
     plume.frustumCulled = false
-    scene.add(plume)
+    plume.matrixAutoUpdate = true
+    nozzleGroupRef.current?.add(plume)
     plumeRef.current = plume; plumeMaterialRef.current = plumeMat
 
     // ---- Exhaust particles ----
@@ -826,23 +860,28 @@ export function Scene({ telemetryRef, launched, vehicleId, selecting, quality = 
         const isThrusting = telemetry.stage === 'powered-ascent'
 
         if (plume && plumeMat) {
+          // Physics gate: visible exactly while the engine is actually
+          // producing thrust, nothing else. No altitude/position hacks --
+          // the parent-child transform chain (rocket -> nozzleGroup ->
+          // plume) already guarantees correct placement and gimbal tilt
+          // for free, every frame, even through vehicle swaps or dropped
+          // frames.
           plume.visible = isThrusting
           if (isThrusting) {
+            // Vacuum expansion: real nozzle plumes flare wider and longer
+            // as ambient pressure drops with altitude. Pure physics-driven
+            // shaping, independent of camera/rendering concerns -- the
+            // parent chain handles making it *visible*, this just makes
+            // it look *right*.
             const expansionFactor = 1.0 - Math.exp(-telemetry.altitude / 8500)
             plumeMat.uniforms.expansionFactor.value = expansionFactor
             plumeMat.uniforms.time.value = elapsed
-            // Scale plume with altitude: vacuum expansion makes it wider & longer
-            // as ambient pressure drops. Also keep it visually proportional to
-            // the rocket itself (not just the raw cone size) so it doesn't look
-            // like a tiny spark once the chase camera has pulled back.
-            const plumeScale = (1.0 + expansionFactor * 4.0) * Math.max(rocketRadius / 0.36, 1)
+            // Local-space scale only -- the rocket's own model scale and
+            // world transform are already applied by the parent chain, so
+            // this is purely "how much does the plume grow relative to
+            // the engine bell it's attached to," not a world-space fudge.
+            const plumeScale = 1.0 + expansionFactor * 2.2
             plume.scale.set(plumeScale, plumeScale, plumeScale)
-            plume.position.set(r.position.x, r.position.y, r.position.z)
-            // Plume is a standalone scene object (not parented to the
-            // rocket group), so it needs the full world-space tilt:
-            // body angle plus the nozzle's own gimbal deflection relative
-            // to that body.
-            plume.rotation.z = r.rotation.z + (telemetry.gimbalAngle * Math.PI) / 180
           }
         }
 
