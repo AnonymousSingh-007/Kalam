@@ -343,6 +343,17 @@ type State13 = [
 
 const STATE_LEN = 13
 
+/** Minimal raw pose for render-side fixed-step interpolation (see
+ *  RocketPhysicsEngine.poseSnapshot()). px/py/pz match Telemetry's
+ *  lateralOffset/altitude/positionZ exactly (same state slots, unrounded);
+ *  qx/qy/qz/qw is the body->local orientation quaternion, unrounded and
+ *  not yet decomposed into any Euler-style angle. */
+export interface PoseSnapshot {
+  time: number
+  px: number; py: number; pz: number
+  qx: number; qy: number; qz: number; qw: number
+}
+
 interface Ctx {
   m: number
   xcg: number
@@ -1298,6 +1309,28 @@ export class RocketPhysicsEngine {
       chuteState: this.chuteState,
       outcome: this.outcome,
       impactSpeed: round(this.impactSpeed),
+    }
+  }
+
+  /** Raw render-pose state (position + orientation quaternion), unrounded,
+   *  taken directly from the 13-scalar integrator state. Additive only --
+   *  Telemetry and snapshot() are untouched. Added so the render loop can
+   *  run a fixed-step accumulator with interpolation: snapshot() alone
+   *  isn't enough for that, because bodyAngle/yawAngle/rollAngle are
+   *  Euler-like *derived* quantities (atan2 projections of the quaternion),
+   *  and SLERPing between two decomposed-angle snapshots is not the same
+   *  operation as SLERPing the true orientation -- it can take the wrong
+   *  short way around near a ±180° wrap or through a projection
+   *  singularity the atan2 decomposition introduces. The render side must
+   *  interpolate the raw quaternion and re-derive any Euler-style angle
+   *  from the *interpolated* quaternion, never interpolate the angles
+   *  themselves. */
+  poseSnapshot(): PoseSnapshot {
+    const s = this.s
+    return {
+      time: this.time,
+      px: s[0], py: s[1], pz: s[2],
+      qx: s[6], qy: s[7], qz: s[8], qw: s[9],
     }
   }
 
