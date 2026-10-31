@@ -9,6 +9,7 @@ import { CloudPass } from './CloudPass'
 import { buildVehicle, type VehicleModel } from './buildRocket'
 import { buildGround, type GroundResult } from './buildGround'
 import { buildSun } from './buildSun'
+import { ALTITUDE_SCALE } from '../constants/scale'
 import type { Telemetry, VehicleId, QualityTier } from '../types'
 
 interface SceneProps {
@@ -19,7 +20,6 @@ interface SceneProps {
   quality?: QualityTier
 }
 
-const ALTITUDE_SCALE = 0.05
 const GROUND_CLOUD_COUNT = 260
 const GROUND_CLOUD_WINDOW = 3.0
 const TRENCH_CLOUD_COUNT = 140
