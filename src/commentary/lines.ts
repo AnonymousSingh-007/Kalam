@@ -2,13 +2,18 @@ import type { CommentaryTrigger } from '../types'
 
 export interface CommentaryLine {
   trigger: CommentaryTrigger
-  // text can be a string or a function that receives live telemetry values
-  text: string | ((data: CommentaryData) => string)
-  // minimum condition to fire — optional guard so telemetry lines
-  // don't fire when the value isn't interesting yet
-  guard?: (data: CommentaryData) => boolean
+  text: string
 }
 
+// CommentaryData is kept as an export for backward compatibility with
+// anything still importing the type, but lines no longer read live
+// telemetry values into their wording — every line below is a fixed,
+// pre-written string. Reading a number into a spoken/displayed line
+// couples the commentary to render-frame timing (which tick's value
+// happened to be current when the line fired) and reads as a HUD
+// readout rather than a called-out flight event; mission-control-style
+// callouts describe what's happening, not what the gauges say, since the
+// instrument panel already shows the numbers continuously.
 export interface CommentaryData {
   altitude: number
   velocity: number
@@ -20,214 +25,105 @@ export interface CommentaryData {
 
 export const COMMENTARY_LINES: CommentaryLine[] = [
   // ---- countdown ----
-  { trigger: 'countdown', text: "Five fingers. Bold opening statement." },
-  { trigger: 'countdown', text: "Counting down. Try not to sneeze." },
-  { trigger: 'countdown', text: "Your hand is doing more engineering than the rocket right now." },
-  { trigger: 'countdown', text: "Almost there. The rocket is watching. It's nervous too." },
-  { trigger: 'countdown', text: "T-minus whatever your hand says." },
-  { trigger: 'countdown', text: "Biometric launch authorization. Very fancy. Very unnecessary." },
-  { trigger: 'countdown', text: "Each finger you lower is a promise to physics." },
-  { trigger: 'countdown', text: "Hand tracking nominal. Sanity: unconfirmed." },
+  { trigger: 'countdown', text: "Countdown in progress." },
+  { trigger: 'countdown', text: "Crew interface reporting nominal hand-tracking lock." },
+  { trigger: 'countdown', text: "Final countdown sequence underway." },
+  { trigger: 'countdown', text: "Holding for confirmed gesture input." },
+  { trigger: 'countdown', text: "Countdown proceeding. Standing by for launch authorization." },
+  { trigger: 'countdown', text: "Range is green. Awaiting final count." },
 
   // ---- pre-launch ----
-  { trigger: 'pre-launch', text: "Parameters locked in. No refunds past this point." },
-  { trigger: 'pre-launch', text: "Numbers submitted. Let's see if you paid attention in physics." },
-  { trigger: 'pre-launch', text: "Configuration locked. There's no undo button on a launch." },
-  { trigger: 'pre-launch', text: "All systems are go. Whether they should be is a separate question." },
-  { trigger: 'pre-launch', text: "Propellant loaded. Prayers optional but not discouraged." },
-  { trigger: 'pre-launch', text: "This is fine. Everything is fine. Launch is go." },
-  { trigger: 'pre-launch', text: "Pre-launch checks complete. Some of them, anyway." },
-  { trigger: 'pre-launch', text: "Fingers crossed. Literally, apparently, given how we got here." },
+  { trigger: 'pre-launch', text: "Vehicle parameters locked. Configuration finalized." },
+  { trigger: 'pre-launch', text: "Propellant load confirmed. Standing by for launch." },
+  { trigger: 'pre-launch', text: "Pre-launch checklist complete. Vehicle is go for launch." },
+  { trigger: 'pre-launch', text: "All systems report go. Awaiting terminal count." },
+  { trigger: 'pre-launch', text: "Flight computer armed. Holding at the pad." },
+  { trigger: 'pre-launch', text: "Range safety clear. Vehicle is go." },
 
   // ---- ignition ----
-  { trigger: 'ignition', text: "And we have liftoff. Physics, don't embarrass me." },
-  { trigger: 'ignition', text: "Engines lit. This is the part where we find out if you did the math right." },
-  { trigger: 'ignition', text: "Ground control has left the chat." },
-  { trigger: 'ignition', text: "Thrust exceeds weight. Technically that counts as flying." },
-  { trigger: 'ignition', text: "T-zero. The pad is someone else's problem now." },
-  { trigger: 'ignition', text: "Liftoff confirmed. The rocket is aggressively leaving." },
-  { trigger: 'ignition', text: "Engines at full thrust. The ground strongly disagrees with this." },
-  {
-    trigger: 'ignition',
-    text: (d) => `${d.axialGLoad.toFixed(1)}g at ignition. The rocket is not subtle about this.`
-  },
+  { trigger: 'ignition', text: "Ignition. We have liftoff." },
+  { trigger: 'ignition', text: "Engine ignition confirmed. Vehicle has cleared the tower." },
+  { trigger: 'ignition', text: "Liftoff. Thrust is nominal." },
+  { trigger: 'ignition', text: "Main engine start. Vehicle is clear of the pad." },
+  { trigger: 'ignition', text: "Ignition sequence complete. Climbing out." },
+  { trigger: 'ignition', text: "Engines at full thrust. Vehicle is away." },
 
   // ---- ascent (continuous, fires every few seconds through the burn) ----
-  { trigger: 'ascent', text: "Still climbing. The exhaust trail is doing most of the storytelling here." },
-  { trigger: 'ascent', text: "Engine's still lit. So far, so expected." },
-  { trigger: 'ascent', text: "Throttle up, ego up. Powered ascent continues." },
-  { trigger: 'ascent', text: "No drama yet. Don't get comfortable." },
-  { trigger: 'ascent', text: "Burning fuel at a rate that would make an accountant weep." },
-  { trigger: 'ascent', text: "The pad is a distant memory now. Good riddance." },
-  { trigger: 'ascent', text: "Thrust nominal. Everything is going suspiciously well." },
-  { trigger: 'ascent', text: "Still under power. The sky is getting less sky-colored." },
-  {
-    trigger: 'ascent',
-    text: (d) => `${d.altitude.toFixed(0)} metres and climbing. Nothing's on fire that shouldn't be.`
-  },
-  {
-    trigger: 'ascent',
-    text: (d) => `${d.velocity.toFixed(0)} metres per second, straight up. Respectable.`
-  },
-  {
-    trigger: 'ascent',
-    text: (d) => `${d.axialGLoad.toFixed(1)}g right now. Comfortable, as rocket flight goes.`,
-    guard: (d) => d.axialGLoad <= 7
-  },
-  {
-    trigger: 'ascent',
-    text: (d) => `Angle of attack sitting at ${d.angleOfAttack.toFixed(1)} degrees. Nothing to report.`,
-    guard: (d) => d.angleOfAttack < 10
-  },
-  {
-    trigger: 'ascent',
-    text: (d) => `${d.altitude.toFixed(0)}m up, ${d.velocity.toFixed(0)}m/s and rising. The rocket is, for once, behaving.`
-  },
-  { trigger: 'ascent', text: "Still powered. Still pointed roughly the right way. We'll take it." },
-  { trigger: 'ascent', text: "Climbing hard. The ground has officially stopped being relevant." },
+  { trigger: 'ascent', text: "Powered ascent continuing. Trajectory nominal." },
+  { trigger: 'ascent', text: "Engine performance nominal. Vehicle is tracking the planned profile." },
+  { trigger: 'ascent', text: "Still under power. All systems report normal." },
+  { trigger: 'ascent', text: "Ascent continuing. No anomalies reported." },
+  { trigger: 'ascent', text: "Vehicle is tracking nominal. Powered flight continues." },
+  { trigger: 'ascent', text: "Thrust nominal. Pitch program proceeding as planned." },
+  { trigger: 'ascent', text: "Flight controller reports a clean ascent so far." },
+  { trigger: 'ascent', text: "Powered flight continues. Attitude nominal." },
+  { trigger: 'ascent', text: "Guidance is tracking the planned ascent profile." },
+  { trigger: 'ascent', text: "Vehicle performance remains within nominal limits." },
 
   // ---- max-q ----
-  { trigger: 'max-q', text: "Max aerodynamic pressure. The rocket is currently having a bad time." },
-  { trigger: 'max-q', text: "This is statistically the most likely moment for things to go wrong. Cool, cool." },
-  { trigger: 'max-q', text: "Peak dynamic pressure. The rocket would like a moment." },
-  { trigger: 'max-q', text: "The atmosphere is pushing back. Hard." },
-  { trigger: 'max-q', text: "Structure holding. Barely counts as a compliment but here we are." },
-  { trigger: 'max-q', text: "We are through max-Q. Everything from here is structurally more relaxing." },
-  {
-    trigger: 'max-q',
-    text: (d) => `Max-Q at ${d.altitude.toFixed(0)}m. The air up here has opinions.`
-  },
-  {
-    trigger: 'max-q',
-    text: (d) => `${d.velocity.toFixed(0)} metres per second through peak pressure. Aggressive.`
-  },
+  { trigger: 'max-q', text: "Max-Q. Vehicle is now through the period of peak aerodynamic load." },
+  { trigger: 'max-q', text: "Passing through maximum dynamic pressure." },
+  { trigger: 'max-q', text: "Max-Q confirmed. Structural loads peaking and easing." },
+  { trigger: 'max-q', text: "Through the max-Q region. Vehicle is structurally sound." },
+  { trigger: 'max-q', text: "Dynamic pressure past its peak. Proceeding through ascent." },
 
   // ---- burnout ----
-  { trigger: 'burnout', text: "Fuel's gone. We're coasting on vibes now." },
-  { trigger: 'burnout', text: "Engine cutoff. Everything from here is just momentum and hope." },
-  { trigger: 'burnout', text: "MECO. We are now a very expensive ballistic object." },
-  { trigger: 'burnout', text: "Tank empty. The rocket is now a passenger." },
-  { trigger: 'burnout', text: "All that fuel, gone in seconds. Rocketry is a humbling field." },
-  {
-    trigger: 'burnout',
-    text: (d) => `Burnout at ${d.altitude.toFixed(0)}m with ${d.velocity.toFixed(0)}m/s. The math checks out.`
-  },
-  {
-    trigger: 'burnout',
-    text: (d) => `${d.axialGLoad.toFixed(1)}g at cutoff. From here, gravity takes over.`
-  },
+  { trigger: 'burnout', text: "Main engine cutoff. Propellant depleted." },
+  { trigger: 'burnout', text: "MECO confirmed. Vehicle is now in unpowered flight." },
+  { trigger: 'burnout', text: "Engine shutdown. Coasting on momentum." },
+  { trigger: 'burnout', text: "Burnout confirmed. Powered ascent complete." },
+  { trigger: 'burnout', text: "Cutoff confirmed. Vehicle is now ballistic." },
 
   // ---- coast ----
-  { trigger: 'coast', text: "Still climbing, no thrust required. Efficient, if nothing else." },
-  { trigger: 'coast', text: "Momentum doing all the work now. Everyone else can relax." },
-  { trigger: 'coast', text: "Rising on pure inertia. Newton's still got it." },
-  { trigger: 'coast', text: "Coast phase. The rocket is gliding on its own confidence." },
-  { trigger: 'coast', text: "Ballistic arc in progress. Art, basically." },
-  {
-    trigger: 'coast',
-    text: (d) => `Coasting at ${d.altitude.toFixed(0)}m, still doing ${d.velocity.toFixed(0)}m/s. Impressive.`
-  },
-  {
-    trigger: 'coast',
-    text: (d) => `${d.velocity.toFixed(0)} metres per second and no engine running. That's just physics being polite.`
-  },
+  { trigger: 'coast', text: "Coast phase. No thrust, trajectory nominal." },
+  { trigger: 'coast', text: "Vehicle continuing upward on momentum alone." },
+  { trigger: 'coast', text: "Unpowered ascent continuing. Tracking nominal." },
+  { trigger: 'coast', text: "Coasting toward apogee. All systems nominal." },
+  { trigger: 'coast', text: "Ballistic trajectory confirmed. No anomalies." },
 
   // ---- apogee ----
-  { trigger: 'apogee', text: "Peak altitude reached. It's all downhill from here. Literally." },
-  { trigger: 'apogee', text: "Apogee. The one moment this rocket wasn't going up or down. Savor it." },
-  { trigger: 'apogee', text: "Zero vertical velocity. A brief, expensive pause." },
-  { trigger: 'apogee', text: "This is as far as we go. Gravity has been very patient." },
-  { trigger: 'apogee', text: "Top of the arc. Peaceful up here. Won't last." },
-  {
-    trigger: 'apogee',
-    text: (d) => `Apogee at ${d.altitude.toFixed(0)} metres. Dr. Kalam would have done the orbital math by now.`
-  },
-  {
-    trigger: 'apogee',
-    text: (d) => `Peak reached: ${d.altitude.toFixed(0)}m. The view is great. The next part is less great.`
-  },
+  { trigger: 'apogee', text: "Apogee. Vehicle has reached peak altitude." },
+  { trigger: 'apogee', text: "Peak altitude confirmed. Vertical velocity at zero." },
+  { trigger: 'apogee', text: "Apogee reached. Beginning the descent phase." },
+  { trigger: 'apogee', text: "Vehicle at apogee. Trajectory now reversing." },
 
   // ---- descent ----
-  { trigger: 'descent', text: "And now it falls. Gravity, undefeated since forever." },
-  { trigger: 'descent', text: "What goes up. You know the rest." },
-  { trigger: 'descent', text: "Falling with style. Or just falling. Hard to say from here." },
-  { trigger: 'descent', text: "Descent confirmed. Physics remains undefeated." },
-  {
-    trigger: 'descent',
-    text: (d) => `Descending from ${d.altitude.toFixed(0)}m at ${Math.abs(d.velocity).toFixed(0)}m/s downward. The ground is approaching with enthusiasm.`
-  },
-  {
-    trigger: 'descent',
-    text: (d) => `${Math.abs(d.velocity).toFixed(0)} metres per second, downward. Drag is doing its best.`
-  },
+  { trigger: 'descent', text: "Descent confirmed. Vehicle is returning to the ground." },
+  { trigger: 'descent', text: "Entering descent phase." },
+  { trigger: 'descent', text: "Vehicle descending. Recovery sequence standing by." },
+  { trigger: 'descent', text: "Descent underway. Monitoring for recovery deployment." },
 
   // ---- landed ----
-  { trigger: 'landed', text: "Touchdown. Or impact. The telemetry doesn't really editorialize." },
-  { trigger: 'landed', text: "Flight complete. Go ahead, adjust the numbers and do it again." },
-  { trigger: 'landed', text: "Mission concluded. The data doesn't lie, even when it's unflattering." },
-  { trigger: 'landed', text: "Contact. That's a wrap on this one." },
-  { trigger: 'landed', text: "End of flight. The pad team would like a word about the scorch marks." },
-  {
-    trigger: 'landed',
-    text: (d) => `Landed after ${d.time.toFixed(1)} seconds. ${d.time < 30 ? "Short flight. Bold attempt." : d.time < 60 ? "Respectable flight time." : "That was a proper mission."}`
-  },
-  {
-    trigger: 'landed',
-    text: (d) => `Impact velocity: ${Math.abs(d.velocity).toFixed(1)}m/s. ${Math.abs(d.velocity) > 50 ? "That's not a landing, that's a geological event." : Math.abs(d.velocity) > 20 ? "Firm but survivable. Probably." : "Clean touchdown."}`
-  },
+  { trigger: 'landed', text: "Touchdown confirmed. Flight complete." },
+  { trigger: 'landed', text: "Vehicle has landed. Mission concluded." },
+  { trigger: 'landed', text: "Contact confirmed. End of flight." },
+  { trigger: 'landed', text: "Flight terminated at touchdown. Recovery can proceed." },
 
   // ---- event-reactive: high G ----
-  { trigger: 'high-g', text: "G-load is getting uncomfortable. The rocket disagrees with this trajectory." },
-  { trigger: 'high-g', text: "Structural margins are being consulted right now." },
-  {
-    trigger: 'high-g',
-    text: (d) => `${d.axialGLoad.toFixed(1)}g axial load. Things are getting physically intense.`
-  },
-  {
-    trigger: 'high-g',
-    text: (d) => `${d.axialGLoad.toFixed(1)}g. For reference, fighter pilots black out at around 9g. Just saying.`
-  },
+  { trigger: 'high-g', text: "High axial load detected. Monitoring structural margins." },
+  { trigger: 'high-g', text: "Axial acceleration elevated. Structure holding within limits." },
+  { trigger: 'high-g', text: "Load factor elevated. Flight controller monitoring closely." },
 
   // ---- event-reactive: steep AoA ----
-  { trigger: 'high-aoa', text: "Angle of attack is climbing. The rocket is developing opinions about its direction." },
-  { trigger: 'high-aoa', text: "That's a lot of lateral drift. Wind is winning this argument." },
-  {
-    trigger: 'high-aoa',
-    text: (d) => `${d.angleOfAttack.toFixed(1)} degrees angle of attack. Stability is a suggestion at this point.`
-  },
-  {
-    trigger: 'high-aoa',
-    text: (d) => `AoA at ${d.angleOfAttack.toFixed(1)}°. Real rockets have guidance computers for exactly this reason.`
-  },
+  { trigger: 'high-aoa', text: "Angle of attack elevated. Monitoring vehicle stability." },
+  { trigger: 'high-aoa', text: "Significant aerodynamic sideslip detected." },
+  { trigger: 'high-aoa', text: "Attitude deviation noted. Guidance compensating." },
 
   // ---- event-reactive: fast descent ----
-  { trigger: 'fast-descent', text: "Velocity on the way down is ambitious. The ground is not moving." },
-  { trigger: 'fast-descent', text: "Coming in fast. Very fast. Concerningly fast." },
-  {
-    trigger: 'fast-descent',
-    text: (d) => `${Math.abs(d.velocity).toFixed(0)}m/s downward. Terminal velocity is a term that feels relevant here.`
-  },
-  {
-    trigger: 'fast-descent',
-    text: (d) => `Descending at ${Math.abs(d.velocity).toFixed(0)}m/s. The drag coefficient is trying its best.`
-  }
+  { trigger: 'fast-descent', text: "Descent rate elevated. Monitoring for recovery deployment." },
+  { trigger: 'fast-descent', text: "High descent rate detected. Awaiting chute deployment." },
+  { trigger: 'fast-descent', text: "Rate of descent above nominal. Recovery system standing by." },
 ]
 
-export function getLine(trigger: CommentaryTrigger, data: CommentaryData, exclude: Set<string>): string {
-  const options = COMMENTARY_LINES.filter((l) => {
-    if (l.trigger !== trigger) return false
-    if (l.guard && !l.guard(data)) return false
-    const text = typeof l.text === 'function' ? l.text(data) : l.text
-    return !exclude.has(text)
-  })
+export function getLine(trigger: CommentaryTrigger, _data: CommentaryData, exclude: Set<string>): string {
+  const options = COMMENTARY_LINES.filter((l) => l.trigger === trigger && !exclude.has(l.text))
   if (options.length === 0) {
-    // All lines excluded (or guarded out) — fall back to any line for this
-    // trigger that still passes its guard, ignoring the exclusion set.
-    const fallback = COMMENTARY_LINES.filter((l) => l.trigger === trigger && (!l.guard || l.guard(data)))
+    // All lines for this trigger were excluded — fall back to the full
+    // set for this trigger, ignoring the exclusion set, rather than
+    // return nothing.
+    const fallback = COMMENTARY_LINES.filter((l) => l.trigger === trigger)
     if (fallback.length === 0) return ''
-    const picked = fallback[Math.floor(Math.random() * fallback.length)]
-    return typeof picked.text === 'function' ? picked.text(data) : picked.text
+    return fallback[Math.floor(Math.random() * fallback.length)].text
   }
-  const picked = options[Math.floor(Math.random() * options.length)]
-  return typeof picked.text === 'function' ? picked.text(data) : picked.text
+  return options[Math.floor(Math.random() * options.length)].text
 }
