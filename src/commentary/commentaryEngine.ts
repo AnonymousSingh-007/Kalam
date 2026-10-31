@@ -1,6 +1,16 @@
 import type { Telemetry, CommentaryTrigger } from '../types'
 import { getLine, type CommentaryData } from './lines'
 
+/** `important`: true for stage transitions, max-Q, and event-reactive
+ *  lines (ignition, burnout, high-g, etc.) — one-shot moments worth
+ *  queuing for if speech is mid-sentence. false for periodic ascent/
+ *  coast/descent filler, which is safe to drop when busy since another
+ *  one follows within a few seconds regardless. */
+export interface CommentaryResult {
+  text: string
+  important: boolean
+}
+
 const PERIODIC_INTERVAL = 8        // seconds between periodic coast/descent lines
 const ASCENT_PERIODIC_INTERVAL = 4 // seconds between periodic powered-ascent lines (burns are short, keep it livelier)
 const HIGH_G_THRESHOLD = 7        // axial g-load above this fires high-g event
@@ -57,9 +67,10 @@ export class CommentaryEngine {
     return line
   }
 
-  tick(telemetry: Telemetry, airDensity: number): string | null {
+  tick(telemetry: Telemetry, airDensity: number): CommentaryResult | null {
     const data = this.buildData(telemetry)
     let line: string | null = null
+    let important = false
 
     // ---- Max-Q detection ----
     const dynamicPressure = 0.5 * airDensity * telemetry.velocity * telemetry.velocity
@@ -72,6 +83,7 @@ export class CommentaryEngine {
     ) {
       this.maxQFired = true
       line = this.fire('max-q', data)
+      important = true
     }
 
     // ---- Stage transitions ----
@@ -83,7 +95,7 @@ export class CommentaryEngine {
         descent: 'descent'
       }
       const trigger = map[telemetry.stage]
-      if (trigger) line = this.fire(trigger, data)
+      if (trigger) { line = this.fire(trigger, data); important = true }
       this.lastStage = telemetry.stage
       this.lastPeriodicTime = telemetry.time
 
@@ -97,7 +109,10 @@ export class CommentaryEngine {
     // ---- Periodic lines during long quiet phases, AND through the burn ----
     // Powered ascent gets its own shorter interval and trigger bank so the
     // commentary stays continuous from ignition through burnout, not just
-    // on the way down.
+    // on the way down. These are filler, not important — safe to drop if
+    // a previous line is still being read, since another one follows
+    // shortly anyway (unlike a stage transition or event, which is a
+    // one-shot moment worth queuing for).
     if (!line && telemetry.stage === 'powered-ascent') {
       if (telemetry.time - this.lastPeriodicTime >= ASCENT_PERIODIC_INTERVAL) {
         line = this.fire('ascent', data)
@@ -123,6 +138,7 @@ export class CommentaryEngine {
     ) {
       this.highGFired = true
       line = this.fire('high-g', data)
+      important = true
     }
 
     // ---- Event-reactive: steep angle of attack ----
@@ -133,6 +149,7 @@ export class CommentaryEngine {
     ) {
       this.highAoaFired = true
       line = this.fire('high-aoa', data)
+      important = true
     }
 
     // ---- Event-reactive: fast descent ----
@@ -144,9 +161,11 @@ export class CommentaryEngine {
     ) {
       this.fastDescentFired = true
       line = this.fire('fast-descent', data)
+      important = true
     }
 
-    return line
+    if (!line) return null
+    return { text: line, important }
   }
 
   fireLanded(telemetry: Telemetry): string {
