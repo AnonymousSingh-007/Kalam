@@ -1,4 +1,5 @@
 import * as THREE from 'three'
+import { ALTITUDE_SCALE, PLANET_RADIUS } from '../constants/scale'
 
 // ╔═══════════════════════════════════════════════════════════════════════╗
 // ║  TRUE-SCALE PLANET                                                   ║
@@ -17,10 +18,14 @@ import * as THREE from 'three'
 // ╚═══════════════════════════════════════════════════════════════════════╝
 
 // ---- Constants --------------------------------------------------------
-const EARTH_RADIUS_M = 6_371_000
-/** 1 scene unit = 20 metres (matching ALTITUDE_SCALE = 0.05 in Scene.tsx) */
-export const ALTITUDE_SCALE = 0.05
-export const PLANET_RADIUS = EARTH_RADIUS_M * ALTITUDE_SCALE  // 318 550
+// ALTITUDE_SCALE and PLANET_RADIUS now come from the single shared
+// constants module (src/constants/scale.ts) instead of being declared
+// here — this file used to be where ALTITUDE_SCALE was first exported
+// from, with Scene.tsx and buildRocket.ts each keeping their own
+// independent (and easy to accidentally desync) copy of the same value.
+// Re-exported here too so nothing importing { ALTITUDE_SCALE, PLANET_RADIUS }
+// from this module specifically needs to change.
+export { ALTITUDE_SCALE, PLANET_RADIUS }
 
 const ATMOSPHERE_THICKNESS_M = 80_000
 const ATMOSPHERE_THICKNESS = ATMOSPHERE_THICKNESS_M * ALTITUDE_SCALE // 4000
