@@ -37,6 +37,11 @@ function App() {
   const lastHudRef = useRef<number>(0)
   const stepVehicleRef = useRef<(dir: 1 | -1) => void>(() => {})
   const gestureTimerRef = useRef<number>(0)
+  // One-slot queue for a commentary line that arrived while a previous
+  // line was still being read. Only "important" lines (stage transitions,
+  // max-Q, events) get queued here — periodic filler is dropped instead,
+  // since another filler line follows within a few seconds regardless.
+  const pendingImportantRef = useRef<string | null>(null)
 
   const [vehicleIndex, setVehicleIndex] = useState(1)
   const [lastGesture, setLastGesture] = useState('')
@@ -192,17 +197,42 @@ function App() {
           // interpolated altitude hovering near 0 right at touchdown) and
           // would otherwise risk a spurious or delayed trigger.
           for (const t of result.ticks) {
+            // Flight termination always interrupts — a safety message
+            // overriding whatever line is mid-read is correct, not a bug.
             if (!engineRef.current.isAborted()) {
               const verdict = checkWatchdog(t)
               if (verdict) {
                 engineRef.current.abort()
                 setAbortMessage(verdict.message)
                 setCommentary(`FLIGHT TERMINATION: ${verdict.message}`)
+                continue
               }
             }
 
-            const line = commentaryEngineRef.current.tick(t, t.airDensity)
-            if (line) setCommentary(line)
+            // Let a line finish being spoken before replacing it. Without
+            // this, a periodic/event line firing every few seconds would
+            // overwrite the caption and queue a new utterance mid-word —
+            // commentary.tick() still runs every tick so its internal
+            // bookkeeping (max-Q tracking, stage-change detection, event
+            // one-shot flags) stays correct, but the resulting line is
+            // only surfaced once speech has actually finished.
+            const speaking = 'speechSynthesis' in window && window.speechSynthesis.speaking
+            const result2 = commentaryEngineRef.current.tick(t, t.airDensity)
+            if (result2) {
+              if (!speaking) {
+                setCommentary(result2.text)
+              } else if (result2.important) {
+                // Don't drop a one-shot moment (ignition, burnout, max-Q,
+                // an event threshold) just because filler was mid-sentence
+                // — hold it and surface it the instant speech frees up.
+                pendingImportantRef.current = result2.text
+              }
+              // periodic filler dropped silently when busy — another one
+              // follows within a few seconds regardless
+            } else if (pendingImportantRef.current && !speaking) {
+              setCommentary(pendingImportantRef.current)
+              pendingImportantRef.current = null
+            }
 
             if (t.altitude <= 0 && t.stage === 'descent' && t.time > 1) {
               setCommentary((prev) =>
@@ -238,7 +268,12 @@ function App() {
   useEffect(() => {
     if (!commentary) return
     if (!('speechSynthesis' in window)) return
-    window.speechSynthesis.cancel()
+    // Previously called speechSynthesis.cancel() before every utterance,
+    // which kills whatever's currently being spoken mid-word the instant
+    // a new line is queued. With commentary firing every few seconds
+    // during ascent, that meant most lines got cut off before finishing.
+    // speak() already queues on its own when you don't cancel first — so
+    // just enqueue and let each line finish before the next one starts.
     const utterance = new SpeechSynthesisUtterance(commentary)
     utterance.rate = 1.05
     utterance.pitch = 0.9
@@ -270,6 +305,8 @@ function App() {
     setLaunched(true)
     setAbortMessage('')
     commentaryEngineRef.current.reset()
+    pendingImportantRef.current = null
+    if ('speechSynthesis' in window) window.speechSynthesis.cancel()
     const snap = engine.snapshot()
     setCommentary(commentaryEngineRef.current.firePreLaunch(snap))
   }
