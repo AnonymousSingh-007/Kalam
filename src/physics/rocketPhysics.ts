@@ -304,6 +304,11 @@ const K_THETA = 1.8                  // attitude-hold outer loop (1/s)
 const K_OMEGA = 6.0                  // rate inner loop (1/s)
 const RCS_ACCEL = 30 * RAD           // RCS angular-acceleration authority, per axis
 const RCS_DEADBAND = 0.04
+// Full throttle sweep (0 -> 1 or 1 -> 0) takes 2 seconds of held Up/Down —
+// fast enough to be responsive, slow enough that it reads as a lever being
+// moved rather than a toggle switch, consistent with the gimbal actuator's
+// own rate-limited (not instant) response to a held pitch key.
+const THROTTLE_RATE = 0.5            // per second, full range in 2s
 // Movable aerodynamic control fins (grid-fin / all-moving-fin class). Their
 // authority scales with dynamic pressure, so they take over from TVC exactly
 // where TVC runs out of torque against the airframe's own stiffness.
@@ -423,7 +428,7 @@ export const EMPTY_TELEMETRY: Telemetry = {
   time: 0, altitude: 0, velocity: 0, acceleration: 0, mass: 0, stage: 'pre-launch',
   lateralOffset: 0, lateralVelocity: 0, bodyAngle: 0, angularVelocity: 0,
   gimbalAngle: 0, angleOfAttack: 0, dynamicPressure: 0, machNumber: 0,
-  thrustNewtons: 0, isp: 0, twr: 0, maxQ: 0, maxMach: 0, propellantRemaining: 0,
+  thrustNewtons: 0, throttle: 1, isp: 0, twr: 0, maxQ: 0, maxMach: 0, propellantRemaining: 0,
   axialGLoad: 0, lateralGLoad: 0,
   airspeed: 0, flightPathAngle: 0, maxAltitude: 0,
   rcsFuel: 0, rcsTorque: 0, pitchRateCommand: 0, attitudeTarget: 0, gimbalCommand: 0,
@@ -475,6 +480,22 @@ export class RocketPhysicsEngine {
   private yawInput = 0
   private rollInput = 0
   private assist = true
+  // Manual throttle, 0..1. Multiplies the existing ignition-ramp/tailoff
+  // `frac` in subStep() rather than replacing it — so the realistic
+  // ignition ramp-up and burnout tail-off are preserved, and a player who
+  // never touches Up/Down gets exactly today's behavior (throttle stays
+  // at its default of 1, i.e. full commanded thrust, same as before this
+  // control existed). Free 0..1 range, no floor once ignited — the
+  // player can throttle down to a full cutoff mid-burn and back up again
+  // while propellant remains, by design (no realism gate here).
+  private throttleInput = 1
+  // Raw -1/0/+1 direction from setThrottleInput(), integrated into
+  // throttleInput each subStep (see THROTTLE_RATE below). Kept separate
+  // from throttleInput itself for the same reason pitchInput (a raw -1..1
+  // key signal) is kept separate from the controller's actual commanded
+  // rate/attitude state — one is "what key is held right now," the other
+  // is "the resulting physical quantity after integration."
+  private throttleRateInput = 0
   private attHoldPitch = 0        // rad, old theta convention (nose-right positive)
   private attHoldYaw = 0          // rad, nose-right(+X)-positive, matches pitch convention
   private attHoldRoll = 0         // rad, standard right-hand about +Y_body
@@ -548,6 +569,11 @@ export class RocketPhysicsEngine {
     this.pitchInput = 0
     this.yawInput = 0
     this.rollInput = 0
+    // Fresh flight starts at full throttle, matching pre-throttle-control
+    // behavior exactly (a player who never touches Up/Down should see no
+    // difference at all from before this feature existed).
+    this.throttleInput = 1
+    this.throttleRateInput = 0
     this.attHoldPitch = 0
     this.attHoldYaw = 0
     this.attHoldRoll = 0
@@ -595,6 +621,22 @@ export class RocketPhysicsEngine {
   /** true: flight-computer rate command + attitude hold. false: raw gimbal. */
   setAssist(enabled: boolean): void {
     this.assist = enabled
+  }
+
+  /** Up/Down keys: -1 = decrease throttle, 0 = hold, +1 = increase throttle.
+   *  This is a RATE of change, not a direct throttle value — subStep()
+   *  integrates it each tick (THROTTLE_RATE per second) and clamps to
+   *  [0, 1], the same "held key ramps a continuous quantity" pattern as
+   *  pitch's rate-command, rather than snapping straight to 0 or 1 on a
+   *  single keypress. */
+  setThrottleInput(input: number): void {
+    this.throttleRateInput = clamp(input, -1, 1)
+  }
+
+  /** Current manual throttle setting, 0..1 — read by Telemetry.throttle
+   *  for the HUD. */
+  getThrottle(): number {
+    return this.throttleInput
   }
 
   launch(): void {
@@ -887,11 +929,26 @@ export class RocketPhysicsEngine {
     // ---- engine state ----
     const atm0 = isa1976(s[1])
     const tNow = this.time - this.tLaunch
+    // Manual throttle: integrate the held Up/Down direction into a 0..1
+    // lever position, same rate-command-into-a-continuous-quantity shape
+    // as pitch (held key -> integrated state), not an instant snap.
+    this.throttleInput = clamp(this.throttleInput + this.throttleRateInput * THROTTLE_RATE * h, 0, 1)
     let frac = 0
     let mdot = 0
     let consumed = 0
     if (this.prop > 0) {
-      frac = tNow < IGN_TIME ? IGN_FLOOR + (1 - IGN_FLOOR) * smoothstep(tNow / IGN_TIME) : 1
+      // Ignition ramp-up and burnout tail-off (ignFrac) are unchanged --
+      // still fully automatic, not something the player can skip or
+      // shortcut. throttleInput is a SEPARATE multiplier on top of that
+      // automatic profile: at the default throttleInput=1 this is exactly
+      // frac = ignFrac, i.e. identical to pre-throttle-control behavior.
+      const ignFrac = tNow < IGN_TIME ? IGN_FLOOR + (1 - IGN_FLOOR) * smoothstep(tNow / IGN_TIME) : 1
+      frac = ignFrac * this.throttleInput
+      // Propellant consumption scales with the SAME frac the thrust force
+      // uses, so throttling down genuinely conserves propellant (not just
+      // "free" thrust reduction with no cost) -- a player holding Down
+      // gets a longer burn time out of the same propellant load, same as
+      // a real throttleable engine.
       consumed = Math.min(this.prop, this.mdot0 * frac * h)
       mdot = consumed / h
       if (this.prop - consumed <= 1e-9) {
@@ -1332,6 +1389,7 @@ export class RocketPhysicsEngine {
       dynamicPressure: round(d.q),
       machNumber: round(d.mach, 4),
       thrustNewtons: round(this.lastT),
+      throttle: round(this.throttleInput, 3),
       isp: round(this.lastMdot > 1e-9 ? this.lastT / (this.lastMdot * G0) : 0),
       twr: round(this.lastT / (mp.m * grav)),
       maxQ: round(this.maxQ),
