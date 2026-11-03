@@ -11,7 +11,7 @@ import { InstrumentPanel } from './ui/InstrumentPanel'
 import { Scene } from './render/Scene'
 import { VehicleSelect } from './ui/VehicleSelect'
 import { VEHICLES } from './render/buildRocket'
-import { GestureDetector, raisedHandPitch } from './hand/gestures'
+import { GestureDetector, raisedHandPitch, debugRaiseY } from './hand/gestures'
 import { FixedStepDriver } from './renderInterp'
 import type { CountdownState, Telemetry, RocketParams } from './types'
 import './App.css'
@@ -161,8 +161,17 @@ function App() {
       if (video && tracker && tracker.isReady() && video.readyState >= 2) {
         const hands = tracker.detect(video, performance.now())
         const reading = hands.length > 0 ? countFingers(hands[0]) : null
+        // raiseY/pitch are temporary debug fields (see gestures.ts's
+        // debugRaiseY) added to pin down why raised-hand pitch wasn't
+        // registering -- raiseY is the exact value tested against
+        // RAISE_THRESHOLD_Y (0.35; lower y = higher in frame), pitch is
+        // what raisedHandPitch(hands) actually returns this frame. Once
+        // the right threshold/behavior is confirmed, these two fields
+        // (and the debugRaiseY export) can be removed again.
+        const raiseY = hands.length > 0 ? debugRaiseY(hands[0]).toFixed(2) : 'n/a'
+        const debugPitch = raisedHandPitch(hands)
         setDebug(
-          `hands: ${hands.length} | score: ${hands[0]?.score?.toFixed(2) ?? 'n/a'} | hand: ${hands[0]?.handedness ?? 'n/a'} | reading: ${reading}`
+          `hands: ${hands.length} | score: ${hands[0]?.score?.toFixed(2) ?? 'n/a'} | hand: ${hands[0]?.handedness ?? 'n/a'} | reading: ${reading} | raiseY: ${raiseY} | pitch: ${debugPitch}`
         )
         machine.tick(reading)
 
