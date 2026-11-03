@@ -8,6 +8,11 @@
  *  FRAME        local launch-site tangent frame, inertial, origin at the pad.
  *               +Y = up, +Z = north, +X = east. NOT rotating (no Coriolis,
  *               no Earth-rotation boost — see 6dof-spec.md "Deferred").
+ *               This convention is now also an explicit, importable type
+ *               (LaunchSitePos) in constants/frames.ts, alongside the
+ *               planet-centred and render frames and the conversions
+ *               between all three — this comment describes the same
+ *               frame that module defines, not a second parallel one.
  *  BODY AXES    +Y_body = nose-first (thrust/symmetry axis), +X_body =
  *               pitch-plane normal (today's old "n"), +Z_body = yaw-plane
  *               normal (new). Gimbal/fin pitch acts in the X_body-Y_body
@@ -73,6 +78,7 @@ import * as Q from './quat'
 import type { Vec3 } from './vec3'
 import type { Quat } from './quat'
 import { EARTH_RADIUS_M } from '../constants/scale'
+import { PLANET_CENTER_IN_LAUNCH_SITE_FRAME } from '../constants/frames'
 
 // ═══════════════════════════ constants ═══════════════════════════
 
@@ -109,12 +115,22 @@ const round = (v: number, d = 2) => {
 }
 
 // ═══════════════════════════ spherical gravity (3D) ═══════════════════════════
-// The planet centre sits directly below the pad in the local frame. Gravity
-// points from the vehicle's position toward that centre, magnitude
-// g0 * (R_earth / r)^2 — now resolves properly in X, Y, AND Z, so
-// out-of-plane (Z) drift also tilts gravity toward the true centre, same as
-// the existing X-direction fix.
-const PLANET_CENTER: Vec3 = [0, -R_EARTH, 0]
+// The planet centre sits directly below the pad in the local (launch-site)
+// frame. Gravity points from the vehicle's position toward that centre,
+// magnitude g0 * (R_earth / r)^2 — resolves properly in X, Y, AND Z, so
+// out-of-plane (Z) drift also tilts gravity toward the true centre.
+//
+// PLANET_CENTER used to be its own inline `const PLANET_CENTER: Vec3 =
+// [0, -R_EARTH, 0]` here — the exact same point buildGround.ts's "planet
+// sits one radius below the pad" logic and Scene.tsx's render-frame math
+// each had to independently agree was correct, with nothing enforcing
+// that agreement. It's now PLANET_CENTER_IN_LAUNCH_SITE_FRAME, defined
+// once in constants/frames.ts as the fixed translation between the
+// launch-site and planet-centred frames, and read here as a plain Vec3
+// (frames.ts has no three.js/DOM dependency, so this doesn't compromise
+// this module's deliberately headless design — same reasoning as the
+// EARTH_RADIUS_M import above).
+const PLANET_CENTER: Vec3 = [...PLANET_CENTER_IN_LAUNCH_SITE_FRAME]
 
 function gravityVector3(p: Vec3): { g: Vec3; mag: number; r: number } {
   const d = V3.sub(p, PLANET_CENTER)
