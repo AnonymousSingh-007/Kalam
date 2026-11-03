@@ -144,23 +144,47 @@ export class GestureDetector {
 const RAISE_THRESHOLD_Y = 0.35
 
 /** Binary (matches held-key magnitude, per design decision) pitch input
- *  from a raised hand: -1 = left hand raised (pitch left, same sign as
- *  Left arrow), +1 = right hand raised (pitch right, same as Right
- *  arrow), 0 = no hand raised, or both hands raised at once (ambiguous
- *  input is treated as no input, not averaged or last-write-wins --
- *  there's no sign convention that would make "both raised" meaningful
- *  as a pitch command). Needs at least 4 visible landmarks' worth of an
- *  open-enough hand to read a stable palm centre; a closed fist is still
- *  readable here (unlike swipe, which requires an open hand) since this
- *  only needs hand POSITION, not a flat palm shape, to detect "raised." */
+ *  from a raised hand: -1 = user's left hand raised (pitch left, same
+ *  sign as Left arrow), +1 = user's right hand raised (pitch right, same
+ *  as Right arrow), 0 = no hand raised, or both hands raised at once
+ *  (ambiguous input is treated as no input, not averaged or
+ *  last-write-wins -- there's no sign convention that would make "both
+ *  raised" meaningful as a pitch command). Needs at least 4 visible
+ *  landmarks' worth of an open-enough hand to read a stable palm centre;
+ *  a closed fist is still readable here (unlike swipe, which requires an
+ *  open hand) since this only needs hand POSITION, not a flat palm
+ *  shape, to detect "raised."
+ *
+ *  HANDEDNESS IS FLIPPED FROM MediaPipe's OWN LABEL, DELIBERATELY: the
+ *  on-screen webcam preview is CSS-mirrored (App.css's .webcam-pip has
+ *  `transform: scaleX(-1)`) for a natural selfie view, but that mirror
+ *  is a display-only CSS transform -- the raw, UNMIRRORED camera frame
+ *  is what actually reaches HandTracker.detect() (a CSS transform on the
+ *  <video> element doesn't touch the pixel data another API reads from
+ *  it). MediaPipe's handedness classifier is trained assuming a
+ *  mirrored/selfie-view input, so on an unmirrored frame its "Left"/
+ *  "Right" label comes out swapped relative to the hand the user is
+ *  actually looking at raise in their own (mirrored) preview. Bug found
+ *  by the user testing this live: raising a hand had no visible effect,
+ *  traced to this swap meaning `h.handedness === 'Right'` was true when
+ *  the user's physically LEFT hand was raised, and vice versa -- so the
+ *  `=== 0` keyboard-priority guard in App.tsx was never the problem,
+ *  this mislabeling was. Flipped in the two branches below rather than
+ *  in HandTracker.detect() itself or fingerCount.ts, since neither of
+ *  those currently branches on handedness at all (fingerCount.ts is
+ *  explicitly handedness-agnostic by its own comment) -- this function
+ *  is the first and only consumer of handedness in this codebase, so the
+ *  correction belongs here, not upstream. */
 export function raisedHandPitch(hands: DetectedHand[]): -1 | 0 | 1 {
   let leftRaised = false
   let rightRaised = false
   for (const h of hands) {
     const { y } = palmCentre(h)
     if (y >= RAISE_THRESHOLD_Y) continue
-    if (h.handedness === 'Left') leftRaised = true
-    else if (h.handedness === 'Right') rightRaised = true
+    // Flipped: MediaPipe's 'Right' means the user's actual LEFT hand on
+    // this unmirrored-input pipeline (see the long comment above).
+    if (h.handedness === 'Right') leftRaised = true
+    else if (h.handedness === 'Left') rightRaised = true
   }
   if (leftRaised && rightRaised) return 0
   if (leftRaised) return -1
