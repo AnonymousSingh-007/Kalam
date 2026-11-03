@@ -119,3 +119,51 @@ export class GestureDetector {
     return 'clap'
   }
 }
+
+// ─────────────────────── in-flight pitch control ───────────────────────
+//
+// Raised-hand pitch input, used only during flight (App.tsx gates this to
+// phase === 'launched'; GestureDetector above is reset and ignored during
+// flight, since swipe/clap/cooldown bookkeeping has no meaning once a
+// rocket is in the air). Deliberately NOT part of the GestureDetector
+// class: swipe and clap are edge-triggered events with cooldowns and
+// multi-frame trails, but "is a hand currently raised" is a plain
+// per-frame level condition -- there's no trail to accumulate and no
+// cooldown to respect, so giving it its own state would only have added
+// unused fields to every call site that doesn't need them.
+//
+// RAISE_THRESHOLD_Y: MediaPipe landmarks are normalized image coordinates
+// with y=0 at the TOP of frame and y=1 at the bottom (standard image
+// convention, not a math/screen-space one) -- so "raised" means a palm
+// centre Y *below* this threshold, not above it. 0.35 puts the trigger
+// zone in roughly the upper third of the frame: high enough that a hand
+// held at a normal resting/typing height in front of the webcam doesn't
+// accidentally trigger it, low enough that raising a hand to about
+// shoulder-to-head height (the natural "raise your hand" motion) clears
+// it without the player having to stretch to the very top of frame.
+const RAISE_THRESHOLD_Y = 0.35
+
+/** Binary (matches held-key magnitude, per design decision) pitch input
+ *  from a raised hand: -1 = left hand raised (pitch left, same sign as
+ *  Left arrow), +1 = right hand raised (pitch right, same as Right
+ *  arrow), 0 = no hand raised, or both hands raised at once (ambiguous
+ *  input is treated as no input, not averaged or last-write-wins --
+ *  there's no sign convention that would make "both raised" meaningful
+ *  as a pitch command). Needs at least 4 visible landmarks' worth of an
+ *  open-enough hand to read a stable palm centre; a closed fist is still
+ *  readable here (unlike swipe, which requires an open hand) since this
+ *  only needs hand POSITION, not a flat palm shape, to detect "raised." */
+export function raisedHandPitch(hands: DetectedHand[]): -1 | 0 | 1 {
+  let leftRaised = false
+  let rightRaised = false
+  for (const h of hands) {
+    const { y } = palmCentre(h)
+    if (y >= RAISE_THRESHOLD_Y) continue
+    if (h.handedness === 'Left') leftRaised = true
+    else if (h.handedness === 'Right') rightRaised = true
+  }
+  if (leftRaised && rightRaised) return 0
+  if (leftRaised) return -1
+  if (rightRaised) return 1
+  return 0
+}
