@@ -14,6 +14,12 @@ export function InstrumentPanel({ telemetry, isThrusting }: InstrumentPanelProps
   const mach = telemetry?.machNumber ?? 0
   const qKpa = (telemetry?.dynamicPressure ?? 0) / 1000
   const rcs = telemetry?.rcsFuel ?? 0
+  // Default 1 (full throttle) matches EMPTY_TELEMETRY / a fresh engine's
+  // default throttleInput, so pre-launch this reads 100% rather than 0 --
+  // consistent with "the lever hasn't been touched yet" being full, not
+  // off, which is also the physically correct starting position for the
+  // ignition-ramp/tailoff profile this multiplies in rocketPhysics.ts.
+  const throttle = (telemetry?.throttle ?? 1) * 100
 
   return (
     <div className="instrument-panel">
@@ -24,6 +30,7 @@ export function InstrumentPanel({ telemetry, isThrusting }: InstrumentPanelProps
       <Gauge label="MACH" value={mach} unit="" max={3} color="#a78bfa" decimals={2} />
       <Gauge label="Q" value={qKpa} unit="kPa" max={80} color="#facc15" decimals={1} />
       <Gauge label="RCS" value={rcs} unit="kg" max={0.6} color="#2dd4bf" decimals={2} />
+      <Gauge label="THR" value={throttle} unit="%" max={100} color="#fb923c" decimals={0} />
       {isThrusting && (
         <GimbalIndicator angle={gimbal} />
       )}
