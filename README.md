@@ -1,6 +1,6 @@
 # Kalam
 
-An interactive rocket-launch simulator driven by hand gestures, a full 6-DOF rigid-body flight model, and rule-based spoken commentary. You arm the launch by counting down from 5 to 0 with your hand, configure the vehicle, then fly it: hold the arrow keys to command pitch rate and the flight computer allocates torque between thrust vectoring, aerodynamic control fins and cold-gas thrusters. Everything runs in the browser.
+An interactive rocket-launch simulator driven by hand gestures, a full 6-DOF rigid-body flight model, and rule-based spoken commentary. You arm the launch by counting down from 5 to 0 with your hand, configure the vehicle, then fly it: hold the left/right arrow keys (or raise your left/right hand) to command pitch rate, hold up/down to command throttle, and the flight computer allocates torque between thrust vectoring, aerodynamic control fins and cold-gas thrusters. Everything runs in the browser.
 
 Physics comes first. The renderer is a view of the telemetry stream; it never feeds anything back into the simulation.
 
@@ -42,7 +42,9 @@ Physics comes first. The renderer is a view of the telemetry stream; it never fe
 - **Full-angle, full-3D aerodynamics.** Normal force is valid from 0 to 180 degrees total angle of attack, resolved independently into pitch-plane and yaw-plane components, so tail-first flight is modelled in any axis and is naturally unstable. Mach-dependent axial drag, fin compressibility correction, cross-flow term, pitch/yaw damping.
 - **Altitude-compensated propulsion.** `F = f * F_vac - p_ambient * A_exit`, mass flow from the burn rate, ignition ramp, tail-off, jet damping. Thrust direction follows a 2-axis gimbal (pitch and yaw).
 - **Moving mass properties.** Centre of gravity and the full diagonal inertia tensor (shared pitch/yaw inertia, plus a separate, smaller roll inertia) are recomputed every step from structure, propellant and cold-gas masses, including the `dI/dt` terms in the rotational equation.
-- **Independent per-axis flight computer.** Arrow keys command pitch rate; `setYawInput`/`setRollInput` are live on the physics engine for yaw and roll (not yet wired to a key — see Known limitations). On release the vehicle holds attitude on each axis independently. Demanded torque for pitch and yaw is shared between thrust vectoring and movable aerodynamic control fins in proportion to the authority each has at that instant; roll has no TVC or fin authority (single-engine vehicle) and is cold-gas only. A finite cold-gas budget, shared across all three axes, covers whatever the other actuators cannot.
+- **Independent per-axis flight computer.** Arrow keys (and a raised hand — see below) command pitch rate; `setYawInput`/`setRollInput` are live on the physics engine for yaw and roll (not yet wired to a key — see Known limitations). On release the vehicle holds attitude on each axis independently. Demanded torque for pitch and yaw is shared between thrust vectoring and movable aerodynamic control fins in proportion to the authority each has at that instant; roll has no TVC or fin authority (single-engine vehicle) and is cold-gas only. A finite cold-gas budget, shared across all three axes, covers whatever the other actuators cannot.
+- **Manual throttle.** Hold up/down to ramp a throttle lever from 0 to 100 percent over 2 s, multiplying the existing automatic ignition-ramp/tail-off profile rather than replacing it — at the default (untouched) setting of 100 percent, flight is identical to before this control existed. Propellant consumption scales with the same multiplier, so throttling down genuinely extends burn time rather than reducing thrust for free. No floor once ignited — throttle can be pulled all the way to a full cutoff and back up again while propellant remains.
+- **In-flight gesture pitch control.** Raising your left or right hand commands the same pitch rate as holding the left or right arrow key (binary, not proportional to how high the hand is raised). Keyboard takes priority — if a pitch key is held, a raised hand is ignored that frame rather than blended with it. Only active once the rocket has launched; the pre-launch swipe/clap gestures are unaffected.
 - **Flight sanity check and runaway watchdog.** Before launch, a quick check flags thrust-to-weight, burn-time or geometry combinations well outside the simulator's tuned envelope and asks for confirmation rather than silently clamping what you typed. During flight, a local rule-based watchdog — no external API, just threshold checks against the engine's own telemetry — detects a control loop that has lost attitude authority and triggers a flight-termination abort: thrust cuts immediately and the main parachute deploys, the same idea as a real rocket's flight termination system. See [Flight safety](#flight-safety-sanity-checks-and-the-watchdog).
 - **Recovery.** Drogue then main parachute, attached at the nose, with forces evaluated at the attachment-point velocity in full 3D (real swing damping follows from this). Deployment is gated by dynamic pressure and altitude, or forced immediately to main by a termination abort.
 - **Touchdown classification** by impact speed, tilt (the true 3D angle from vertical) and spin rate magnitude across all three axes: `landed` or `crashed`.
@@ -115,7 +117,7 @@ Physics comes first. The renderer is a view of the telemetry stream; it never fe
 | Angle of attack | Total 3D angle between the body `+Y` axis and the air-relative velocity, decomposed into independent pitch-plane and yaw-plane components (`alphaPitch`, `alphaYaw`) for the aero model. Reported total is `abs(alphaTotal)` in 0..180 degrees; 180 degrees means tail-first |
 | G-loads | Specific force (what an accelerometer reads); gravity is excluded |
 
-The arrow keys map to the same sign as `bodyAngle`: right arrow is +1 (nose right), left arrow is -1 (nose left). `setYawInput`/`setRollInput` follow the same `-1..+1` convention on their own axes.
+The arrow keys map to the same sign as `bodyAngle`: right arrow is +1 (nose right), left arrow is -1 (nose left). A raised hand follows the same sign on the user's own left/right: raising the right hand is +1, the left hand -1 — matching the keys exactly rather than introducing a second convention. `setYawInput`/`setRollInput` follow the same `-1..+1` convention on their own axes. Up/down arrows follow a separate `-1..+1` convention on `setThrottleInput` (down decreases, up increases) — not a pitch/yaw/roll axis, so it is not part of the sign table above, but uses the same `-1/0/+1` held-key shape.
 
 ---
 
@@ -205,7 +207,7 @@ mdot   = f * burnRate                     mass flow
 Isp_sl = F_sl / (burnRate * g0)           specific impulse follows from the parameters
 ```
 
-- `f` is the throttle fraction: a smooth ramp from 10 percent to 100 percent over 0.6 s at ignition, 1 during burn, and a linear 0.25 s tail-off after propellant depletion.
+- `f` is the throttle fraction: a smooth ramp from 10 percent to 100 percent over 0.6 s at ignition, 1 during burn, and a linear 0.25 s tail-off after propellant depletion — **multiplied by the manual throttle lever** (`throttleInput`, 0 to 1, driven by the up/down arrow keys; see Features). At the lever's default of 1 this multiplier is exactly 1, so `f` is identical to the pre-throttle-control ignition/tail-off profile; pulling the lever down scales `f` (and therefore both thrust and `mdot`/propellant consumption) down proportionally, including to a full cutoff with the lever at 0. The ignition ramp and tail-off themselves are not skippable — the lever multiplies that automatic profile, it does not replace it.
 - Thrust direction is the body `+Y` axis deflected by the gimbal angles — `thrustDirBody = [-sin(gimbalPitch), cos(gimbalPitch)*cos(gimbalYaw), cos(gimbalPitch)*sin(gimbalYaw)]` — then rotated into the local frame by the body quaternion. Thrust acts at the nozzle station (`L`), and its torque is a true 3D cross product `tau_thrust = r_nozzle x F_thrust`, so it naturally couples into whichever axes the gimbal actually deflects.
 - Jet damping generalises to independent pitch and yaw terms, both proportional to `-mdot * (L - x_cg)^2 * rate` on their own axis; roll gets zero jet damping (the exhaust plume carries no roll moment of its own).
 
@@ -225,7 +227,7 @@ The cold-gas mass is carved out of the user's dry mass so total mass at ignition
 
 The flight computer is a rate-command, attitude-hold controller with dynamic inversion, applied independently on each of the pitch, yaw and roll axes.
 
-1. **Command.** While a key is held, the demanded rate on that axis is `+/-30 deg/s` and the attitude target tracks the current attitude (leading by `0.3 s * rate`). On release, the outer loop holds that attitude: `rateCmd = clamp(1.8 * wrap(attitudeHold - attitude), +/-30 deg/s)`. Roll's attitude-hold target defaults to holding the current roll, since no particular roll orientation matters for an unguided ascent.
+1. **Command.** While a key is held (or, for pitch, while a hand is raised — see [Vehicle selection and gestures](#vehicle-selection-and-gestures)), the demanded rate on that axis is `+/-30 deg/s` and the attitude target tracks the current attitude (leading by `0.3 s * rate`). On release, the outer loop holds that attitude: `rateCmd = clamp(1.8 * wrap(attitudeHold - attitude), +/-30 deg/s)`. Roll's attitude-hold target defaults to holding the current roll, since no particular roll orientation matters for an unguided ascent.
 2. **Torque demand.** `tauNeed = I * 6 * (rateCmd - rate) - tauPassive` on pitch and yaw (using `Ixx`); `tauNeed = Iyy * 6 * (rateCmd - rate)` on roll (no passive torque to feed forward, since roll has none). The `- tauPassive` term feeds forward the exact passive aerodynamic, damping, jet and parachute torque on that axis, so the controller cancels the airframe's own stiffness instead of fighting it.
 3. **Allocation (pitch and yaw only).** Two actuators share each axis's demand in proportion to the authority each has right now:
 
@@ -240,7 +242,7 @@ fin_authority = q * A * CN_fin * k(Mach) * 0.75 * (x_fin - x_cg) * fin_max   // 
 
 A raw mode (`setAssist(false)`) maps the keys directly to gimbal and fin deflection on pitch and yaw, and to a roll RCS command, without attitude hold.
 
-Arrow-key UI input remains pitch-only (matches the existing interface); `setYawInput` and `setRollInput` are live physics-engine API that the UI does not yet drive — see Known limitations.
+Arrow-key (and gesture) UI input remains pitch-only (matches the existing interface); `setYawInput` and `setRollInput` are live physics-engine API that the UI does not yet drive — see Known limitations. `setThrottleInput` (up/down arrows) is a separate axis, not part of the flight computer's pitch/yaw/roll control loop — it drives the engine's own thrust-fraction multiplier directly (see [Propulsion](#propulsion)), with no rate-command/attitude-hold behavior of its own.
 
 ### Recovery
 
@@ -312,7 +314,7 @@ The cold-gas thrusters' torque authority (`tauRcsMax`, `tauRcsMaxRoll`) is a veh
 | Attitude (yaw) | `yawAngle`, `yawRate`, `gimbalYawAngle`, `finYawAngle` |
 | Attitude (roll) | `rollAngle`, `rollRate` |
 | Attitude (combined) | `angleOfAttack` (0..180, total 3D) |
-| Aero and propulsion | `dynamicPressure`, `machNumber`, `thrustNewtons`, `isp`, `twr`, `maxQ`, `maxMach`, `propellantRemaining`, `cdAxial` |
+| Aero and propulsion | `dynamicPressure`, `machNumber`, `thrustNewtons`, `throttle` (0..1, manual lever position), `isp`, `twr`, `maxQ`, `maxMach`, `propellantRemaining`, `cdAxial` |
 | Loads | `axialGLoad`, `lateralGLoad` (specific force, in g) |
 | Flight computer | `pitchRateCommand`, `attitudeTarget`, `gimbalCommand`, `rcsFuel`, `rcsTorque` (pitch), `rcsTorqueYaw`, `rcsTorqueRoll` |
 | Vehicle | `staticMargin`, `centerOfGravity`, `centerOfPressure`, `momentOfInertia` (pitch/yaw), `bodyLength` |
@@ -362,12 +364,27 @@ Detection (`hand/gestures.ts`) works on raw, un-mirrored normalised landmark coo
 
 The vehicle choice is cosmetic: all vehicles currently share one aerodynamic and propulsion model. Selection is frozen once the countdown starts.
 
+### In-flight: raised-hand pitch control
+
+Once launched, `hand/gestures.ts` exports a second, separate detector — `raisedHandPitch(hands)` — used alongside (not instead of) the arrow keys:
+
+| Input | Action |
+|---|---|
+| Raise right hand | Pitch right (+1, same sign and magnitude as the right arrow key) |
+| Raise left hand | Pitch left (-1, same as the left arrow key) |
+| Both hands raised, or neither | No pitch input (0) — ambiguous input is treated as none, not averaged |
+
+- Detection is a plain per-frame level check (palm centre Y above a fixed threshold in the normalised image, roughly the upper third of frame), not an edge-triggered gesture with a cooldown — unlike swipe and clap, there is no trail to accumulate and nothing to debounce.
+- **Handedness is deliberately read inverted from MediaPipe's own `categoryName` label.** The on-screen webcam preview is CSS-mirrored (`transform: scaleX(-1)` in `App.css`) for a natural selfie view, but that mirror is display-only — the raw, *un*mirrored frame is what actually reaches the hand tracker. MediaPipe's handedness classifier assumes a mirrored/selfie-view input, so on an unmirrored frame its label comes out swapped relative to the hand the user is actually raising. `raisedHandPitch` corrects for this (`'Right'` from the tracker means the user's physical left hand, and vice versa) rather than leaving the correction to whichever code consumes handedness next — it is currently the only logic in the codebase that branches on handedness at all (`fingerCount.ts`'s thumb detection is explicitly handedness-agnostic by its own comment).
+- **Keyboard takes priority.** If either pitch arrow key is held that frame, the raised-hand signal is ignored entirely rather than summed or averaged with it — avoids a player's own raised arm (steadying themselves, reaching for the keyboard) fighting an intentional keypress.
+- The pre-launch `GestureDetector` instance (swipe/clap) is untouched and is not reset during flight by this — it simply isn't advanced either, since its trail/cooldown state has no meaning once a rocket is in the air.
+
 ---
 
 ## Hand tracking and countdown
 
 - **Detection.** In-browser landmark detection with the GPU delegate, configured for two hands (needed by the clap gesture); the finger countdown reads the first hand. Each frame yields 21 landmarks per hand with handedness and a confidence score.
-- **Finger count.** A joint-angle heuristic per finger, handedness-aware for the thumb, returning 0 to 5 or `null` when no hand is present.
+- **Finger count.** A joint-angle heuristic per finger; the thumb uses a distance-based check (tip-to-opposite-palm-landmark distance versus the same at rest) that is deliberately handedness-*agnostic* — Euclidean distance is mirror-invariant, so it works the same regardless of camera mirroring or reported handedness, unlike `raisedHandPitch` (see [Vehicle selection and gestures](#vehicle-selection-and-gestures)), which does need to correct for it. Returns 0 to 5 or `null` when no hand is present.
 - **State machine.**
 
 ```
@@ -447,7 +464,7 @@ Validation performed headlessly against the engine:
 - **The wind sign is random per launch**, so two otherwise identical launches can drift differently.
 - **The Mach-dependent nose slope is held constant**; only the fins carry the compressibility correction.
 - **Vehicle models are cosmetic**: they do not change mass properties, aerodynamics or propulsion, and the drag, fin and centre-of-gravity geometry is still derived from the reference area. The fin planform in the physics does not match each model's drawn fins. Each model's real-world height (used for render scale) is likewise independent of the physics geometry derived from the reference area.
-- **Gesture thresholds are tuned on synthetic landmark data only** and need calibration on real cameras; swipe direction depends on the camera not being mirrored in the raw feed.
+- **Gesture thresholds are tuned on synthetic landmark data only** and need calibration on real cameras; swipe direction depends on the camera not being mirrored in the raw feed. The in-flight raised-hand pitch threshold (`RAISE_THRESHOLD_Y` in `gestures.ts`) is a fixed fraction of frame height and has the same issue — how high a hand needs to go before it registers depends on camera angle, mounting height and distance from the user, and has not been tuned per setup.
 - **The control fins are modelled in the physics and reported in telemetry** (`finAngle`, `finYawAngle`) but are not yet animated on the 3D model.
 - **Left/right arrow input commands a pitch *rate*, not lateral translation.** Because the attitude-hold loop re-centres pitch quickly and lateral drift is a second-order, lagged consequence of thrust/drag tilt (not a direct force), a short tap reads mostly as the nose tipping rather than as sideways motion — the vehicle does genuinely drift sideways once the tilt has had time to act on its mass, matching real gravity-turn behaviour, but it is not an arcade-style strafe.
 - **Launch parameters are not yet clamped to per-vehicle or physically plausible ranges.** The pre-launch sanity check (see [Flight safety](#flight-safety-sanity-checks-and-the-watchdog)) warns on extreme thrust-to-weight, burn time or geometry, but does not block launch — at the extremes, the control loop can still lose attitude authority, which is what the in-flight watchdog's abort sequence exists to catch.
@@ -476,8 +493,9 @@ npm run preview
 2. **Count down** with one hand: hold 5 fingers steady until it steps to 4, then 3, 2, 1, fist. Each digit must be held for about 0.5 s.
 3. **Set parameters** once armed. Watch the derived thrust-to-weight and burn time update. Launch is blocked below thrust-to-weight 1; well above thrust-to-weight 15 you'll get a warning dialog first.
 4. **Launch.**
-5. **Steer.** Hold the left or right arrow key to command a pitch rate of up to 30 deg/s in that direction. Release to hold the current attitude. Holding for about 6 s turns the vehicle through 180 degrees.
-6. Watch the telemetry. Compare burn, coast, apogee, descent and touchdown against the reference flight, then change parameters and fly again. If a flight's control loop loses authority (most likely at an extreme thrust-to-weight ratio you launched anyway), the watchdog will terminate it automatically — thrust cuts and the main chute deploys, and a banner reports why.
+5. **Steer.** Hold the left or right arrow key — or raise your left or right hand — to command a pitch rate of up to 30 deg/s in that direction. Release (or lower your hand) to hold the current attitude. Holding for about 6 s turns the vehicle through 180 degrees. If both a key and a raised hand are active, the key wins.
+6. **Throttle.** Hold up or down to ramp the throttle lever toward 100 or 0 percent over about 2 s; the `THR` gauge shows the current setting.
+7. Watch the telemetry. Compare burn, coast, apogee, descent and touchdown against the reference flight, then change parameters and fly again. If a flight's control loop loses authority (most likely at an extreme thrust-to-weight ratio you launched anyway), the watchdog will terminate it automatically — thrust cuts and the main chute deploys, and a banner reports why.
 
 ---
 
@@ -492,7 +510,7 @@ src/
 ├── hand/
 │   ├── handTracker.ts          # Hand landmark detector wrapper (two hands)
 │   ├── fingerCount.ts          # Landmark-based finger count (0-5)
-│   └── gestures.ts             # Swipe and clap detection
+│   └── gestures.ts             # Swipe and clap detection (pre-launch); raisedHandPitch (in-flight pitch control)
 ├── state/
 │   └── countdownMachine.ts     # idle -> selecting -> counting -> armed -> launched
 ├── physics/
@@ -535,7 +553,8 @@ The values below live at the top of `rocketPhysics.ts` unless noted otherwise.
 | `IGN_TIME` / `IGN_FLOOR` / `TAILOFF` | 0.6 s / 0.1 / 0.25 s | Ignition ramp and tail-off |
 | `GIMBAL_MAX` / `GIMBAL_RATE` / `GIMBAL_TAU` | 6 deg / 25 deg/s / 0.05 s | Thrust-vector actuator, pitch and yaw |
 | `FIN_CTRL_MAX` / `FIN_CTRL_RATE` / `FIN_CTRL_TAU` / `FIN_CTRL_EFF` | 15 deg / 80 deg/s / 0.03 s / 0.75 | Control-fin actuator and effectiveness, pitch and yaw |
-| `OMEGA_MAX` | 30 deg/s | Commanded rate at full key deflection, per axis |
+| `OMEGA_MAX` | 30 deg/s | Commanded rate at full key (or raised-hand) deflection, per axis |
+| `THROTTLE_RATE` | 0.5 /s | Manual throttle lever rate — full 0 to 1 sweep in 2 s of held up/down |
 | `K_THETA` / `K_OMEGA` | 1.8 / 6.0 per s | Attitude-hold and rate loop gains, all three axes |
 | `RCS_ACCEL` / `RCS_DEADBAND` / `ISP_COLD` | 30 deg/s^2 / 4 percent / 65 s | Cold-gas couple, shared budget across pitch/yaw/roll. `RCS_ACCEL` is combined with the vehicle's *current* inertia every sub-step to set the live torque clamp, not a value frozen at launch |
 | `POST_ABORT_RATE_TAU` | 0.4 s | Exponential time constant for angular-velocity decay once `aborted` is set — only active post-termination, independent of dynamic pressure |
