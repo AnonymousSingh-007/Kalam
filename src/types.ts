@@ -71,6 +71,7 @@ export interface Telemetry {
   dynamicPressure: number  // Pa
   machNumber: number
   thrustNewtons: number    // N, current thrust (altitude compensated)
+  throttle: number         // 0..1, manual throttle lever position (Up/Down keys)
   isp: number              // s, current specific impulse
   twr: number              // thrust-to-weight ratio
   maxQ: number             // Pa, max dynamic pressure so far
