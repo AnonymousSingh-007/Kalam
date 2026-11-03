@@ -11,7 +11,7 @@ import { InstrumentPanel } from './ui/InstrumentPanel'
 import { Scene } from './render/Scene'
 import { VehicleSelect } from './ui/VehicleSelect'
 import { VEHICLES } from './render/buildRocket'
-import { GestureDetector } from './hand/gestures'
+import { GestureDetector, raisedHandPitch } from './hand/gestures'
 import { FixedStepDriver } from './renderInterp'
 import type { CountdownState, Telemetry, RocketParams } from './types'
 import './App.css'
@@ -32,6 +32,10 @@ function App() {
   const driverRef = useRef<FixedStepDriver>(new FixedStepDriver())
   const commentaryEngineRef = useRef<CommentaryEngine>(new CommentaryEngine())
   const gimbalInputRef = useRef<number>(0)
+  // -1/0/+1 from held Up/Down keys (or a raised hand — see gesture
+  // wiring below); read every physics tick the same way gimbalInputRef
+  // is, via engine.setThrottleInput() in loop().
+  const throttleInputRef = useRef<number>(0)
   const rafRef = useRef<number>(0)
   const lastTimeRef = useRef<number>(0)
   const lastHudRef = useRef<number>(0)
@@ -69,9 +73,17 @@ function App() {
 
     let cancelled = false
 
-    const held = { left: false, right: false }
+    const held = { left: false, right: false, up: false, down: false }
     const syncGimbal = () => {
       gimbalInputRef.current = (held.right ? 1 : 0) - (held.left ? 1 : 0)
+    }
+    // Up/Down -> throttle, same held-key-drives-a-rate-command shape as
+    // Left/Right -> pitch. Read every frame in loop() (see
+    // throttleInputRef below) rather than only on keydown/keyup, since the
+    // engine integrates a continuous throttle lever from this -1/0/+1
+    // direction, exactly like gimbalInputRef.
+    const syncThrottle = () => {
+      throttleInputRef.current = (held.up ? 1 : 0) - (held.down ? 1 : 0)
     }
     function handleKeyDown(e: KeyboardEvent) {
       if (machine.getState().phase === 'selecting') {
@@ -81,17 +93,26 @@ function App() {
       }
       if (e.key === 'ArrowLeft')  { held.left = true;  e.preventDefault() }
       if (e.key === 'ArrowRight') { held.right = true; e.preventDefault() }
+      if (e.key === 'ArrowUp')    { held.up = true;    e.preventDefault() }
+      if (e.key === 'ArrowDown')  { held.down = true;  e.preventDefault() }
       syncGimbal()
+      syncThrottle()
     }
     function handleKeyUp(e: KeyboardEvent) {
       if (e.key === 'ArrowLeft')  held.left = false
       if (e.key === 'ArrowRight') held.right = false
+      if (e.key === 'ArrowUp')    held.up = false
+      if (e.key === 'ArrowDown')  held.down = false
       syncGimbal()
+      syncThrottle()
     }
     function handleBlur() {
       held.left = false
       held.right = false
+      held.up = false
+      held.down = false
       syncGimbal()
+      syncThrottle()
     }
     window.addEventListener('keydown', handleKeyDown)
     window.addEventListener('keyup', handleKeyUp)
@@ -150,6 +171,22 @@ function App() {
           if (ev === 'swipe-right') { stepVehicle(1); flashGesture('Swipe → next') }
           else if (ev === 'swipe-left') { stepVehicle(-1); flashGesture('Swipe ← previous') }
           else if (ev === 'clap') { flashGesture('Clap — confirmed'); machine.confirmSelection() }
+        } else if (machine.getState().phase === 'launched') {
+          // In-flight raised-hand pitch control. Deliberately does NOT call
+          // gestures.reset() here (unlike every other non-selecting phase
+          // below) -- that instance's swipe/clap trail-and-cooldown state
+          // has nothing to do with raisedHandPitch, which is stateless and
+          // reads the current hands[] directly every frame.
+          //
+          // Keyboard takes priority over the gesture by design: if either
+          // pitch key is currently held, gimbalInputRef already reflects
+          // that (nonzero), and a raised hand is ignored entirely this
+          // frame rather than being averaged or summed with it -- avoids
+          // the case of a player's own raised arm (steadying themselves,
+          // reaching for the keyboard) fighting an intentional keypress.
+          if (gimbalInputRef.current === 0) {
+            gimbalInputRef.current = raisedHandPitch(hands)
+          }
         } else {
           gestures.reset()
         }
@@ -163,6 +200,7 @@ function App() {
 
       if (engineRef.current && timestamp !== undefined) {
         engineRef.current.setGimbalInput(gimbalInputRef.current)
+        engineRef.current.setThrottleInput(throttleInputRef.current)
 
         // Wall-clock time since the previous rAF callback. Deliberately
         // NOT clamped here to a "reasonable frame" value and handed
