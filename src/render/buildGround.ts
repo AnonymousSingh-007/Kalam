@@ -164,7 +164,39 @@ export function buildGround(): GroundResult {
   // ════════════════════════ 1. Globe sphere ════════════════════════════
   // 256×128 gives ~2.5 km triangles at the equator — fine for the
   // orbital/high-altitude view. We need the near patch for close-up.
-  const globeGeo = new THREE.SphereGeometry(PLANET_RADIUS, 256, 128)
+  //
+  // PRECISION (honest status — read before assuming this "fixes" the
+  // Float32 vertex-magnitude issue, because it mostly doesn't):
+  //
+  // Built at unit radius (1.0) with the full PLANET_RADIUS applied via
+  // globe.scale below, instead of SphereGeometry(PLANET_RADIUS, ...)
+  // baking the radius into every vertex directly. The intent was to keep
+  // the large magnitude on the CPU side (mesh.scale is a JS double) and
+  // only put small, precise numbers (the unit-sphere shape) in the
+  // Float32BufferAttribute that actually ships to the GPU.
+  //
+  // That intent does NOT fully hold up: THREE.Object3D.matrixWorld
+  // (Matrix4.elements) is itself a Float32Array. Once scale is folded
+  // into the object's world matrix for rendering, the GPU-side multiply
+  // is float32-vertex × float32-matrix-element regardless of scale having
+  // started life as a JS double — so this does not eliminate the
+  // precision ceiling the original Float32-spacing note was about. A real
+  // fix needs true camera-relative (floating-origin) rendering: each
+  // frame, recompute (vertex − camera) in JS doubles and upload only that
+  // small residual, which means restructuring how the ground group (and
+  // the camera's own position relative to it) is positioned every frame
+  // — out of scope for this pass; flagged as a follow-up rather than
+  // silently left unaddressed.
+  //
+  // What this change DOES genuinely improve, independent of the above:
+  // the sphere's own *shape* (where each vertex sits relative to the
+  // sphere's center, before scale/position) is now computed and stored
+  // at unit magnitude, which is marginally more numerically stable for
+  // anything that reads raw vertex positions pre-transform (e.g.
+  // `normalize(position)` in the shader below, previously normalizing a
+  // ~318,550-magnitude vector instead of a near-unit one). That's a real
+  // but minor improvement, not the fix for the stated problem.
+  const globeGeo = new THREE.SphereGeometry(1, 256, 128)
   const globeMat = new THREE.MeshStandardMaterial({
     color: 0xffffff, roughness: 0.95, metalness: 0
   })
@@ -184,6 +216,9 @@ export function buildGround(): GroundResult {
   const globe = new THREE.Mesh(globeGeo, globeMat)
   globe.receiveShadow = true
   globe.position.copy(planetCenter)
+  // Full-magnitude radius applied here, as a double on the Object3D, not
+  // baked into the Float32 vertex buffer above. See the geometry comment.
+  globe.scale.setScalar(PLANET_RADIUS)
   group.add(globe)
 
   // ════════════════════════ 2. Near patch ══════════════════════════════
@@ -307,7 +342,16 @@ diffuseColor.a = uPatchOpacity * vEdgeFade;`)
   // ════════════════════════ 4. Atmosphere ═════════════════════════════
   // Back-faced shell with Rayleigh-ish rim glow. From the ground it's
   // invisible (camera inside); from orbit it shows the blue limb.
-  const atmoGeo = new THREE.SphereGeometry(PLANET_RADIUS + ATMOSPHERE_THICKNESS, 128, 64)
+  // Same unit-radius + mesh.scale treatment as the globe sphere above, and
+  // the same honest caveat applies: this does not fix the Float32
+  // model-matrix precision ceiling (see the long comment on globeGeo) —
+  // real camera-relative rendering is the actual fix and is out of scope
+  // for this pass. This shell's own shader only reads view-space normals
+  // and directions, never an absolute vertex magnitude, so unlike the
+  // globe there isn't even the minor shape-precision benefit here —
+  // kept at unit radius purely for consistency with the globe, not for a
+  // precision reason of its own.
+  const atmoGeo = new THREE.SphereGeometry(1, 128, 64)
   const atmoMat = new THREE.ShaderMaterial({
     uniforms: { uIntensity: { value: 0 } },
     vertexShader: /* glsl */ `
@@ -338,6 +382,7 @@ diffuseColor.a = uPatchOpacity * vEdgeFade;`)
   })
   const atmosphere = new THREE.Mesh(atmoGeo, atmoMat)
   atmosphere.position.copy(planetCenter)
+  atmosphere.scale.setScalar(PLANET_RADIUS + ATMOSPHERE_THICKNESS)
   group.add(atmosphere)
 
   // ── helpers ──
