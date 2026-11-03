@@ -9,7 +9,8 @@ import { CloudPass } from './CloudPass'
 import { buildVehicle, type VehicleModel } from './buildRocket'
 import { buildGround, type GroundResult } from './buildGround'
 import { buildSun } from './buildSun'
-import { ALTITUDE_SCALE } from '../constants/scale'
+import { metresToScene } from '../constants/scale'
+import { launchSite, launchSiteToRender } from '../constants/frames'
 import type { Telemetry, VehicleId, QualityTier } from '../types'
 
 interface SceneProps {
@@ -815,11 +816,30 @@ export function Scene({ telemetryRef, launched, vehicleId, selecting, quality = 
         const cgFromBase = telemetry.bodyLength > 0
           ? (1 - telemetry.centerOfGravity / telemetry.bodyLength) * rocketHeight
           : 0.45 * rocketHeight
-        const cgX = telemetry.lateralOffset * ALTITUDE_SCALE
-        const cgY = telemetry.altitude * ALTITUDE_SCALE + cgFromBase
+        // telemetry.lateralOffset/altitude/positionZ are the physics engine's
+        // own launch-site-frame position (metres, +X East / +Y Up / +Z North
+        // — see rocketPhysics.ts's header and constants/frames.ts). Tag them
+        // as such and convert through the one shared launchSiteToRender()
+        // instead of each call site in this file applying its own
+        // `* ALTITUDE_SCALE` to whichever component it happens to need —
+        // that per-site pattern is exactly what let buildGround.ts,
+        // buildRocket.ts and this file drift to three independent copies of
+        // the scale factor itself before the constants-module fix.
+        const cgPosLS = launchSite(telemetry.lateralOffset, telemetry.altitude, telemetry.positionZ)
+        const cgPosRender = launchSiteToRender(cgPosLS)
+        const cgX = cgPosRender[0]
+        const cgY = cgPosRender[1] + cgFromBase
         r.rotation.z = phi
         r.position.x = cgX + cgFromBase * Math.sin(phi)
         r.position.y = cgY - cgFromBase * Math.cos(phi)
+        // Previously left at Three.js's default 0 unconditionally — this is
+        // the actual out-of-plane position now that cgPosRender carries a
+        // real Z component (telemetry.positionZ, frame-converted above).
+        // Zero effect today (positionZ is always 0, nothing in the current
+        // control model yaws), but it's the correct source going forward
+        // rather than an assumption baked into every downstream read of
+        // r.position.z.
+        r.position.z = cgPosRender[2]
         // Keep any tilted body above the pad/ground (matters after a crash or
         // a landing at an angle; zero effect for an upright rocket).
         const lowest =
@@ -847,13 +867,13 @@ export function Scene({ telemetryRef, launched, vehicleId, selecting, quality = 
 
         // ---- Dynamic chase camera ----
         // Follow the CG; pull back with altitude to reveal the globe.
-        updateChaseScale(telemetry.altitude * ALTITUDE_SCALE)
+        updateChaseScale(metresToScene(telemetry.altitude))
         camera.position.set(
           cgX + chaseOffset.x,
           cgY + chaseOffset.y,
-          r.position.z + chaseOffset.z
+          cgPosRender[2] + chaseOffset.z
         )
-        camera.lookAt(cgX, cgY, r.position.z)
+        camera.lookAt(cgX, cgY, cgPosRender[2])
 
         groundResultRef.current?.update(telemetry.altitude)
 
@@ -898,11 +918,11 @@ export function Scene({ telemetryRef, launched, vehicleId, selecting, quality = 
           ignitionLight.intensity = 0
         }
 
-        const trenchActive = isThrusting && telemetry.altitude * ALTITUDE_SCALE < 8
+        const trenchActive = isThrusting && metresToScene(telemetry.altitude) < 8
         if (tLeft && tRight && tLeftMat && tRightMat) {
           tLeft.visible = trenchActive; tRight.visible = trenchActive
           if (trenchActive) {
-            const trenchProgress = Math.min(telemetry.altitude * ALTITUDE_SCALE / 8, 1.0)
+            const trenchProgress = Math.min(metresToScene(telemetry.altitude) / 8, 1.0)
             tLeftMat.uniforms.progress.value = trenchProgress
             tRightMat.uniforms.progress.value = trenchProgress
           }
@@ -912,8 +932,8 @@ export function Scene({ telemetryRef, launched, vehicleId, selecting, quality = 
         const tcVel = trenchCloudVel.current
         const tcAge = trenchCloudAge.current
         if (tc && tcVel && tcAge) {
-          const trenchActiveNow = isThrusting && telemetry.altitude * ALTITUDE_SCALE < 8
-          const trenchProgressNow = Math.min(telemetry.altitude * ALTITUDE_SCALE / 8, 1.0)
+          const trenchActiveNow = isThrusting && metresToScene(telemetry.altitude) < 8
+          const trenchProgressNow = Math.min(metresToScene(telemetry.altitude) / 8, 1.0)
           const posAttr = tc.geometry.getAttribute('position') as THREE.BufferAttribute
           for (let i = 0; i < TRENCH_CLOUD_COUNT; i++) {
             const idx = i * 3
@@ -963,7 +983,7 @@ export function Scene({ telemetryRef, launched, vehicleId, selecting, quality = 
         const camDist = chaseOffset.length()
         heatUniforms.maskRadius.value = THREE.MathUtils.clamp(2.6 / camDist, 0.08, 0.6)
 
-        rocketWorldPos.set(cgX, cgY, r.position.z)
+        rocketWorldPos.set(cgX, cgY, cgPosRender[2])
         rocketWorldPos.project(camera)
         heatUniforms.rocketScreenPos.value.set(
           (rocketWorldPos.x + 1) / 2,
