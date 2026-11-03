@@ -143,6 +143,14 @@ export class GestureDetector {
 // it without the player having to stretch to the very top of frame.
 const RAISE_THRESHOLD_Y = 0.35
 
+/** Debug helper only — exposes the raw palmCentre().y a hand would be
+ *  tested against in raisedHandPitch(), so App.tsx's diagnostics line
+ *  can show real numbers instead of guessing why a raise isn't
+ *  registering. Not used by any control-logic path itself. */
+export function debugRaiseY(h: DetectedHand): number {
+  return palmCentre(h).y
+}
+
 /** Binary (matches held-key magnitude, per design decision) pitch input
  *  from a raised hand: -1 = user's left hand raised (pitch left, same
  *  sign as Left arrow), +1 = user's right hand raised (pitch right, same
