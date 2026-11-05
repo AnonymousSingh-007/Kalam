@@ -63,6 +63,16 @@ function App() {
   // still see the previous render's (stale) value, same reasoning as why
   // pendingImportantRef is a ref and not state.
   const abortMessageRef = useRef<string | null>(null)
+  // Sampled time series for the post-flight dashboard's per-phase graphs.
+  // A ref (not state) because it's written every tick of every frame —
+  // pushing through setState at that rate would mean a re-render per
+  // physics tick, for data nothing reads until the flight is already over.
+  // Downsampled to ~10/s (SAMPLE_INTERVAL) rather than every raw tick:
+  // the graphs are read at a glance, not pixel-inspected, and a 3-minute
+  // flight at the physics engine's actual substep rate would otherwise
+  // build an array with nothing visually gained from the extra points.
+  const telemetryHistoryRef = useRef<Telemetry[]>([])
+  const lastSampleTimeRef = useRef(0)
 
   const [vehicleIndex, setVehicleIndex] = useState(1)
   const [lastGesture, setLastGesture] = useState('')
@@ -85,6 +95,7 @@ function App() {
   const [finishedAbortMessage, setFinishedAbortMessage] = useState<string | null>(null)
   const [showReportPrompt, setShowReportPrompt] = useState(false)
   const [showReport, setShowReport] = useState(false)
+  const [finishedHistory, setFinishedHistory] = useState<Telemetry[]>([])
 
   useEffect(() => {
     machine.onChange(setState)
@@ -329,7 +340,26 @@ function App() {
               reportCapturedRef.current = true
               setFinishedTelemetry(t)
               setFinishedAbortMessage(abortMessageRef.current)
+              // Snapshot the sampled history as of right now — a plain
+              // array copy, not the live ref, so nothing the dashboard
+              // later reads can change out from under it even though
+              // telemetryHistoryRef keeps being written to by stray ticks
+              // after this point (the frozen post-touchdown state still
+              // produces a few more ticks before the loop settles).
+              setFinishedHistory([...telemetryHistoryRef.current])
               setShowReportPrompt(true)
+            }
+
+            // Dashboard sampling — downsampled to ~10/s by simulated time,
+            // not by frame/tick count, so the sample rate is the same
+            // whether the engine is substepping at 60Hz or 240Hz. Always
+            // keep the very first sample (t=0) and keep sampling through
+            // 'landed'/'crashed' for a few ticks so the graphs show the
+            // actual touchdown, not a flat line that stops just before it.
+            const SAMPLE_INTERVAL = 0.1
+            if (t.time === 0 || t.time - lastSampleTimeRef.current >= SAMPLE_INTERVAL) {
+              lastSampleTimeRef.current = t.time
+              telemetryHistoryRef.current.push(t)
             }
           }
 
@@ -382,6 +412,7 @@ function App() {
     setShowReportPrompt(false)
     setFinishedTelemetry(null)
     setFinishedAbortMessage(null)
+    setFinishedHistory([])
     setLaunched(false)
     machine.reset()
     machine.start()
@@ -419,9 +450,12 @@ function App() {
     // a stale repeat of the last flight's touchdown).
     reportCapturedRef.current = false
     abortMessageRef.current = null
+    telemetryHistoryRef.current = []
+    lastSampleTimeRef.current = 0
     setFinishedTelemetry(null)
     setFinishedParams(params)
     setFinishedAbortMessage(null)
+    setFinishedHistory([])
     setShowReportPrompt(false)
     setShowReport(false)
     if ('speechSynthesis' in window) window.speechSynthesis.cancel()
@@ -526,7 +560,7 @@ function App() {
 
       {showReport && finishedTelemetry && finishedParams && (
         <PostFlightReportPanel
-          report={generateReport(finishedTelemetry, finishedParams, finishedAbortMessage)}
+          report={generateReport(finishedTelemetry, finishedParams, finishedAbortMessage, finishedHistory)}
           onClose={() => setShowReport(false)}
           onFlyAgain={handleFlyAgain}
         />
