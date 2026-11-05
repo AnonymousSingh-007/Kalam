@@ -1,163 +1,69 @@
 /**
- * postFlightReport.ts — post-flight debrief: stats, plain-language
- * feedback explaining WHY the flight landed or crashed, and concrete
- * suggestions for the next launch.
+ * PostFlightReport.tsx — the debrief panel shown after a flight ends.
  *
- * Same shape as flightSanity.ts and flightWatchdog.ts: a pure function,
- * no state, no DOM/React dependency, callable headlessly for testing.
- * Takes the FINAL telemetry snapshot (the one captured the instant
- * outcome transitions to 'landed' or 'crashed' — see App.tsx) plus the
- * RocketParams that flew and, if the flight was terminated by the
- * watchdog, the abort message — and returns one PostFlightReport object
- * for the UI to render. This module never reads live/current telemetry
- * or holds any reference to the engine; it's handed one snapshot and
- * returns one report, so building a report is trivial to unit test and
- * cannot accidentally depend on timing.
- *
- * Why landed-vs-crashed needs its OWN explanation, not just the verdict:
- * rocketPhysics.ts's touchdown() already decides 'landed' or 'crashed'
- * from three independent thresholds (impact speed, tilt from vertical,
- * spin rate — see LANDING_LIMITS, exported from rocketPhysics.ts so this
- * module checks the SAME numbers the engine actually used, not a second
- * guessed copy). A crash from "came in 40 m/s too fast, dead vertical,
- * no spin" and a crash from "landed gently but tipped over" are both
- * `outcome: 'crashed'` with very different real causes and very
- * different fixes — this module's job is to say which one actually
- * happened.
+ * Pure presentation: takes the already-built PostFlightReport object
+ * (from postFlightReport.ts's generateReport()) and an onFlyAgain
+ * callback, renders it. Holds no logic of its own about when a flight
+ * ended or what the numbers mean — that's the generator's job, this
+ * component just lays the result out.
  */
+import type { PostFlightReport } from '../postFlightReport'
 
-import type { Telemetry, RocketParams } from './types'
-import { LANDING_LIMITS } from './physics/rocketPhysics'
-
-const G0 = 9.80665
-
-export interface FlightStat {
-  label: string
-  value: string
+interface Props {
+  report: PostFlightReport
+  onClose: () => void
+  onFlyAgain: () => void
 }
 
-export interface PostFlightReport {
-  outcome: 'landed' | 'crashed'
-  /** True when the flight ended via the in-flight watchdog's abort(),
-   *  not a normal touchdown — changes which feedback sentences apply
-   *  (a watchdog abort is a control-loop failure, not a landing-quality
-   *  issue, even though it still ends in outcome: 'crashed' most of the
-   *  time). */
-  wasAborted: boolean
-  abortMessage: string | null
-  stats: FlightStat[]
-  /** Plain technical language explaining what happened and why —
-   *  3 to 6 short sentences, each standalone (no "however"/"but"
-   *  chaining across sentences), ordered most-important-first. */
-  feedback: string[]
-  /** Concrete, actionable suggestions for the NEXT launch, derived from
-   *  which specific thing went wrong — empty array for a clean landed
-   *  flight with nothing to suggest changing. */
-  suggestions: string[]
-}
+export function PostFlightReportPanel({ report, onClose, onFlyAgain }: Props) {
+  const isGood = report.outcome === 'landed' && !report.wasAborted
 
-function fmt(n: number, decimals = 1): string {
-  return n.toFixed(decimals)
-}
+  return (
+    <div className="report-overlay">
+      <div className="report-panel">
+        <div className="report-header">
+          <span
+            className="report-badge"
+            style={{ background: isGood ? '#1b7a3d' : '#b00020' }}
+          >
+            {report.wasAborted ? 'ABORTED' : report.outcome === 'landed' ? 'LANDED' : 'CRASHED'}
+          </span>
+          <h2>Post-Flight Report</h2>
+          <button className="report-close" onClick={onClose} aria-label="Close">×</button>
+        </div>
 
-export function generateReport(
-  telemetry: Telemetry,
-  params: RocketParams,
-  abortMessage: string | null
-): PostFlightReport {
-  const outcome = telemetry.outcome === 'crashed' ? 'crashed' : 'landed'
-  const wasAborted = abortMessage !== null
-  const totalMass = Math.max(params.dryMass + params.propellantMass, 0.001)
-  const twr = params.thrust / (totalMass * G0)
-  const burnTime = params.burnRate > 1e-6 ? params.propellantMass / params.burnRate : Infinity
+        <section className="report-section">
+          <h3>Stats</h3>
+          <div className="report-stats-grid">
+            {report.stats.map((s) => (
+              <div className="report-stat" key={s.label}>
+                <span className="report-stat-label">{s.label}</span>
+                <span className="report-stat-value">{s.value}</span>
+              </div>
+            ))}
+          </div>
+        </section>
 
-  const stats: FlightStat[] = [
-    { label: 'Outcome', value: outcome === 'landed' ? 'Landed' : 'Crashed' },
-    { label: 'Apogee', value: `${fmt(telemetry.maxAltitude, 0)} m` },
-    { label: 'Max velocity', value: `${fmt(telemetry.velocity, 0)} m/s` },
-    { label: 'Max Mach', value: fmt(telemetry.maxMach, 2) },
-    { label: 'Max dynamic pressure', value: `${fmt(telemetry.maxQ / 1000, 1)} kPa` },
-    { label: 'Thrust-to-weight', value: `${fmt(twr, 1)}:1` },
-    { label: 'Burn time', value: Number.isFinite(burnTime) ? `${fmt(burnTime, 1)} s` : 'n/a' },
-    { label: 'Impact speed', value: `${fmt(telemetry.impactSpeed, 1)} m/s` },
-    { label: 'Touchdown tilt', value: `${fmt(telemetry.touchdownTilt, 0)}° from vertical` },
-    { label: 'Touchdown spin', value: `${fmt(telemetry.touchdownSpin, 0)}°/s` },
-    { label: 'Flight time', value: `${fmt(telemetry.time, 1)} s` },
-  ]
+        <section className="report-section">
+          <h3>Feedback</h3>
+          <ul className="report-list">
+            {report.feedback.map((line, i) => <li key={i}>{line}</li>)}
+          </ul>
+        </section>
 
-  const feedback: string[] = []
-  const suggestions: string[] = []
+        {report.suggestions.length > 0 && (
+          <section className="report-section">
+            <h3>Suggestions for next launch</h3>
+            <ul className="report-list">
+              {report.suggestions.map((line, i) => <li key={i}>{line}</li>)}
+            </ul>
+          </section>
+        )}
 
-  // ---- Abort takes priority in the explanation, even if the eventual
-  // outcome also happens to read 'crashed' — the actual cause was the
-  // control loop losing authority, not a landing-quality problem, and
-  // telling the player "you landed too fast" when the real story is
-  // "the watchdog had to terminate the flight" would point them at the
-  // wrong fix.
-  if (wasAborted) {
-    feedback.push(
-      `Flight terminated automatically: ${abortMessage}.`,
-      'This is a safety abort, not a landing judgment — the control loop lost the ability to hold attitude before it reached the ground.'
-    )
-    if (twr > 15) {
-      suggestions.push(
-        `Thrust-to-weight was ${fmt(twr, 1)}:1 — real rockets fly at 1.2 to 4:1. Lowering thrust or adding mass toward that range gives the flight computer a fighting chance to hold attitude through the whole burn.`
-      )
-    } else {
-      suggestions.push(
-        'The parameters were within a normally stable range, so this termination is likely from sustained aggressive steering rather than the vehicle design itself. Try shorter, lighter inputs on the pitch axis instead of holding a key for the whole ascent.'
-      )
-    }
-  } else if (outcome === 'landed') {
-    feedback.push(
-      `Touchdown at ${fmt(telemetry.impactSpeed, 1)} m/s, ${fmt(telemetry.touchdownTilt, 0)}° from vertical, spinning at ${fmt(telemetry.touchdownSpin, 0)}°/s — all three are within the limits for a soft landing (${LANDING_LIMITS.maxImpactSpeedMs} m/s, ${LANDING_LIMITS.maxTiltDeg}°, ${LANDING_LIMITS.maxSpinDegS}°/s).`
-    )
-  } else {
-    // Crashed, not aborted — explain which threshold(s) it actually
-    // broke, since that's the part the bare 'crashed' outcome doesn't
-    // say. More than one can be true at once; report every one that
-    // applies rather than stopping at the first.
-    const brokeSpeed = telemetry.impactSpeed > LANDING_LIMITS.maxImpactSpeedMs
-    const brokeTilt = telemetry.touchdownTilt > LANDING_LIMITS.maxTiltDeg
-    const brokeSpin = telemetry.touchdownSpin > LANDING_LIMITS.maxSpinDegS
-
-    if (brokeSpeed) {
-      feedback.push(
-        `Impact speed was ${fmt(telemetry.impactSpeed, 1)} m/s against a ${LANDING_LIMITS.maxImpactSpeedMs} m/s limit — the vehicle came down too fast for the recovery system to absorb.`
-      )
-      suggestions.push(
-        'Check that the drogue and main parachute actually deployed before touchdown (chuteState in telemetry) — a chute that never opens, or opens too late, is the most common cause of an over-speed landing. If it did deploy, a lighter dry mass gives the same canopy a lower terminal descent rate.'
-      )
-    }
-    if (brokeTilt) {
-      feedback.push(
-        `Touchdown tilt was ${fmt(telemetry.touchdownTilt, 0)}° from vertical against a ${LANDING_LIMITS.maxTiltDeg}° limit — the vehicle landed leaning too far over to count as upright.`
-      )
-      suggestions.push(
-        'A tilted touchdown usually traces back to attitude that was never fully corrected during descent. Avoid steering inputs late in the flight that you don\'t hold long enough to settle — a brief tap right before landing can leave the vehicle still rotating when it touches down.'
-      )
-    }
-    if (brokeSpin) {
-      feedback.push(
-        `Touchdown spin was ${fmt(telemetry.touchdownSpin, 0)}°/s against a ${LANDING_LIMITS.maxSpinDegS}°/s limit — the vehicle was still rotating too fast to count as a controlled landing.`
-      )
-      suggestions.push(
-        'Residual spin at touchdown usually means a steering input was released too close to the ground for the attitude-hold loop to finish settling it. Release pitch input earlier in the descent so the vehicle has time to stop rotating before it reaches the ground.'
-      )
-    }
-    if (!brokeSpeed && !brokeTilt && !brokeSpin) {
-      // Shouldn't normally happen (touchdown() only sets 'crashed' when
-      // at least one threshold is broken), but telemetry is rounded for
-      // display while the engine's own check uses unrounded state, so a
-      // value sitting exactly on a threshold can display as "within
-      // limits" after rounding even though the unrounded check crossed
-      // it. State this plainly rather than claim a cause with no
-      // supporting number.
-      feedback.push(
-        'The flight was classified as a crash, but no individual touchdown value in this report reads clearly over its limit — it likely sat right at the boundary before rounding for display.'
-      )
-    }
-  }
-
-  return { outcome, wasAborted, abortMessage, stats, feedback, suggestions }
+        <div className="report-actions">
+          <button className="report-fly-again" onClick={onFlyAgain}>Fly again</button>
+        </div>
+      </div>
+    </div>
+  )
 }
