@@ -334,17 +334,17 @@ const CHUTE_Q_MAX = 800
 const MAIN_ALT = 350
 const MAIN_Q_MAX = 1500
 // Hard safety-net altitude for forced full-chute deployment, independent
-// of the normal drogue-then-main staging above. 120 ft = 36.576 m. The
-// staged sequence (drogue at CHUTE_Q_MAX, main at MAIN_ALT/MAIN_Q_MAX) is
-// gated on dynamic pressure and only ever checked once, from chuteState
+// of the normal drogue-then-main staging above. 100 m. The staged
+// sequence (drogue at CHUTE_Q_MAX, main at MAIN_ALT/MAIN_Q_MAX) is gated
+// on dynamic pressure and only ever checked once, from chuteState
 // 0 -> 1 -> 2 -- if the vehicle is still above CHUTE_Q_MAX when it would
 // otherwise qualify for the drogue (e.g. a high-TWR flight that's still
 // supersonic at burnout), chuteState never advances past 0 and NOTHING
 // ever opens, all the way to the ground. This forced trigger exists so
-// that can never happen: crossing 120 ft on the way down always deploys
+// that can never happen: crossing 100 m on the way down always deploys
 // full chute area immediately, with no Q gate, as a last-resort override
 // of the staged logic above.
-const FORCED_DEPLOY_ALT = 36.576
+const FORCED_DEPLOY_ALT = 100
 const LAND_V_MAX = 9
 const LAND_TILT_MAX = 30 * RAD
 const LAND_SPIN_MAX = 45 * RAD
@@ -1309,14 +1309,14 @@ export class RocketPhysicsEngine {
   private updateChute(q: number, s: State13): void {
     const burnedOut = this.prop <= 0 && this.tBurnout !== null && this.time > this.tBurnout + TAILOFF
 
-    // Forced safety-net deploy: descending (vy < 0) and at or below 120 ft,
+    // Forced safety-net deploy: descending (vy < 0) and at or below 100 m,
     // with nothing open yet. Checked FIRST and unconditionally (no burnout
     // or dynamic-pressure gate) so it can still catch a flight the staged
     // sequence below missed entirely -- e.g. still above CHUTE_Q_MAX at
     // burnout, which otherwise leaves chuteState stuck at 0 forever (see
     // FORCED_DEPLOY_ALT's comment). Jumps straight to full main deployment
     // (chuteState 2, forcedDeploy flagged) rather than drogue-first --
-    // there's no altitude margin left at 120 ft to run the normal two-stage
+    // there's no altitude margin left at 100 m to run the normal two-stage
     // sequence, so this is deliberately the "last resort, open everything
     // now" path, not a drogue trigger.
     if (this.chuteState === 0 && s[4] < 0 && s[1] <= FORCED_DEPLOY_ALT) {
