@@ -1,0 +1,84 @@
+/* PostFlightReport.css — styles for the post-flight debrief button and
+   panel. Matches VehicleSelect.css's established palette: dark
+   translucent panels, blue accent (#3d7cf0 / #7fb2ff), not a new theme.
+   Append this file's rules into App.css (or import it from App.tsx next
+   to the existing './App.css' import — either works). */
+
+.report-prompt-button {
+  position: absolute;
+  bottom: 16px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 40;
+  padding: 10px 20px;
+  border-radius: 999px;
+  border: 1px solid rgba(160, 190, 255, 0.35);
+  background: rgba(8, 12, 24, 0.82);
+  color: #e8eefc;
+  font-weight: 600;
+  font-size: 13px;
+  cursor: pointer;
+  backdrop-filter: blur(6px);
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.35);
+}
+.report-prompt-button:hover { background: rgba(8, 12, 24, 0.95); border-color: #7fb2ff; }
+
+.report-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(2, 4, 10, 0.55);
+  backdrop-filter: blur(2px);
+}
+
+.report-panel {
+  width: min(560px, 92vw);
+  max-height: 86vh;
+  overflow-y: auto;
+  color: #e8eefc;
+  background: rgba(10, 14, 26, 0.96);
+  border: 1px solid rgba(160, 190, 255, 0.25);
+  border-radius: 14px;
+  padding: 20px 22px;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.5);
+}
+
+.report-header { display: flex; align-items: center; gap: 10px; margin-bottom: 14px; }
+.report-header h2 { flex: 1; margin: 0; font-size: 18px; font-weight: 700; }
+.report-badge {
+  font-size: 11px; font-weight: 700; letter-spacing: 0.08em;
+  padding: 3px 9px; border-radius: 6px; color: #fff; text-transform: uppercase;
+}
+.report-close {
+  border: 0; background: transparent; color: #9fb0d0; font-size: 22px;
+  line-height: 1; cursor: pointer; padding: 0 4px;
+}
+.report-close:hover { color: #fff; }
+
+.report-section { margin-bottom: 16px; }
+.report-section h3 {
+  font-size: 12px; letter-spacing: 0.1em; text-transform: uppercase;
+  opacity: 0.65; margin: 0 0 8px;
+}
+
+.report-stats-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px 16px;
+}
+.report-stat { display: flex; justify-content: space-between; font-size: 13px; }
+.report-stat-label { opacity: 0.7; }
+.report-stat-value { font-weight: 600; color: #7fb2ff; }
+
+.report-list { margin: 0; padding-left: 18px; font-size: 13px; line-height: 1.5; }
+.report-list li { margin-bottom: 6px; opacity: 0.92; }
+
+.report-actions { display: flex; justify-content: flex-end; margin-top: 4px; }
+.report-fly-again {
+  padding: 9px 18px; border-radius: 8px; border: 0; cursor: pointer;
+  font-weight: 600; font-size: 13px; background: #3d7cf0; color: #fff;
+}
+.report-fly-again:hover { background: #2d6ae0; }
