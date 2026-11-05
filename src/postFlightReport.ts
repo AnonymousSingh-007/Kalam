@@ -6,13 +6,19 @@
  * Same shape as flightSanity.ts and flightWatchdog.ts: a pure function,
  * no state, no DOM/React dependency, callable headlessly for testing.
  * Takes the FINAL telemetry snapshot (the one captured the instant
- * outcome transitions to 'landed' or 'crashed' — see App.tsx) plus the
- * RocketParams that flew and, if the flight was terminated by the
- * watchdog, the abort message — and returns one PostFlightReport object
- * for the UI to render. This module never reads live/current telemetry
- * or holds any reference to the engine; it's handed one snapshot and
- * returns one report, so building a report is trivial to unit test and
- * cannot accidentally depend on timing.
+ * outcome transitions to 'landed' or 'crashed' — see App.tsx), the
+ * RocketParams that flew, the watchdog abort message (if any), and an
+ * optional sampled history of Telemetry across the whole flight (also
+ * captured by App.tsx, downsampled to ~10/s) — and returns one
+ * PostFlightReport object, now including per-phase SeriesData for the
+ * dashboard's graphs alongside the plain stats/feedback/suggestions.
+ * This module never reads live/current telemetry or holds any reference
+ * to the engine; it's handed snapshots and returns one report, so
+ * building a report is trivial to unit test and cannot accidentally
+ * depend on timing. `history` defaults to [] so existing callers/tests
+ * written before the dashboard existed still compile unchanged — the
+ * resulting report just has empty series/phases, which the UI treats as
+ * "no dashboard data, fall back to stat tiles."
  *
  * Why landed-vs-crashed needs its OWN explanation, not just the verdict:
  * rocketPhysics.ts's touchdown() already decides 'landed' or 'crashed'
@@ -26,7 +32,7 @@
  * happened.
  */
 
-import type { Telemetry, RocketParams } from './types'
+import type { Telemetry, RocketParams, FlightStage } from './types'
 import { LANDING_LIMITS } from './physics/rocketPhysics'
 
 const G0 = 9.80665
@@ -34,6 +40,27 @@ const G0 = 9.80665
 export interface FlightStat {
   label: string
   value: string
+}
+
+/** One named curve for the dashboard, already in display units. `points`
+ *  is [time, value] pairs in flight-time order — the chart component
+ *  just maps these to pixel space, no unit conversion of its own. */
+export interface SeriesData {
+  label: string
+  unit: string
+  color: string
+  points: [number, number][]
+}
+
+/** A labeled time range the dashboard shades/divides the graphs by —
+ *  derived from Telemetry.stage transitions in the sampled history, so
+ *  "which phase was this" always matches what the physics engine itself
+ *  was doing at that instant, never a second guessed segmentation. */
+export interface FlightPhase {
+  stage: FlightStage
+  label: string
+  startTime: number
+  endTime: number
 }
 
 export interface PostFlightReport {
@@ -54,16 +81,61 @@ export interface PostFlightReport {
    *  which specific thing went wrong — empty array for a clean landed
    *  flight with nothing to suggest changing. */
   suggestions: string[]
+  /** Per-phase time series for the dashboard's graphs. Empty when no
+   *  history was sampled (e.g. the flight ended on literally the first
+   *  tick) — the UI falls back to the plain stat tiles in that case. */
+  series: SeriesData[]
+  phases: FlightPhase[]
+}
+
+const STAGE_LABEL: Record<FlightStage, string> = {
+  'pre-launch': 'Pre-Launch',
+  'powered-ascent': 'Powered Ascent',
+  coast: 'Coast',
+  apogee: 'Apogee',
+  descent: 'Descent',
 }
 
 function fmt(n: number, decimals = 1): string {
   return n.toFixed(decimals)
 }
 
+/** Walk the sampled history and collapse consecutive same-stage samples
+ *  into named phase ranges. Pure function of the history array — reads
+ *  nothing else, so it's trivial to feed a hand-built history in a test. */
+function derivePhases(history: Telemetry[]): FlightPhase[] {
+  const phases: FlightPhase[] = []
+  for (const t of history) {
+    const last = phases[phases.length - 1]
+    if (last && last.stage === t.stage) {
+      last.endTime = t.time
+    } else {
+      phases.push({ stage: t.stage, label: STAGE_LABEL[t.stage], startTime: t.time, endTime: t.time })
+    }
+  }
+  return phases
+}
+
+function buildSeries(history: Telemetry[]): SeriesData[] {
+  if (history.length === 0) return []
+  const pick = (f: (t: Telemetry) => number): [number, number][] =>
+    history.map((t) => [t.time, f(t)])
+
+  return [
+    { label: 'Altitude', unit: 'm', color: '#00f0ff', points: pick((t) => t.altitude) },
+    { label: 'Velocity', unit: 'm/s', color: '#ff2bd6', points: pick((t) => t.velocity) },
+    { label: 'Acceleration', unit: 'm/s²', color: '#7cff6b', points: pick((t) => t.acceleration) },
+    { label: 'Mach', unit: '', color: '#ffd166', points: pick((t) => t.machNumber) },
+    { label: 'Dynamic Pressure', unit: 'kPa', color: '#a06bff', points: pick((t) => t.dynamicPressure / 1000) },
+    { label: 'Throttle', unit: '%', color: '#ff7a00', points: pick((t) => t.throttle * 100) },
+  ]
+}
+
 export function generateReport(
   telemetry: Telemetry,
   params: RocketParams,
-  abortMessage: string | null
+  abortMessage: string | null,
+  history: Telemetry[] = []
 ): PostFlightReport {
   const outcome = telemetry.outcome === 'crashed' ? 'crashed' : 'landed'
   const wasAborted = abortMessage !== null
@@ -74,7 +146,7 @@ export function generateReport(
   const stats: FlightStat[] = [
     { label: 'Outcome', value: outcome === 'landed' ? 'Landed' : 'Crashed' },
     { label: 'Apogee', value: `${fmt(telemetry.maxAltitude, 0)} m` },
-    { label: 'Max velocity', value: `${fmt(telemetry.velocity, 0)} m/s` },
+    { label: 'Max velocity', value: `${fmt(telemetry.maxVelocity, 0)} m/s` },
     { label: 'Max Mach', value: fmt(telemetry.maxMach, 2) },
     { label: 'Max dynamic pressure', value: `${fmt(telemetry.maxQ / 1000, 1)} kPa` },
     { label: 'Thrust-to-weight', value: `${fmt(twr, 1)}:1` },
@@ -159,5 +231,14 @@ export function generateReport(
     }
   }
 
-  return { outcome, wasAborted, abortMessage, stats, feedback, suggestions }
+  return {
+    outcome,
+    wasAborted,
+    abortMessage,
+    stats,
+    feedback,
+    suggestions,
+    series: buildSeries(history),
+    phases: derivePhases(history),
+  }
 }
