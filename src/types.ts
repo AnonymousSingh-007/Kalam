@@ -126,6 +126,8 @@ export interface Telemetry {
   chuteState: 0 | 1 | 2    // 0 stowed, 1 drogue, 2 main
   outcome: 'flying' | 'landed' | 'crashed'
   impactSpeed: number      // m/s at touchdown (0 until touchdown)
+  touchdownTilt: number    // deg from vertical at touchdown (0 until touchdown)
+  touchdownSpin: number    // deg/s, |angular velocity| at touchdown (0 until touchdown)
 }
 
 // ───────────────────────── commentary ─────────────────────────
