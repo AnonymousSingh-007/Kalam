@@ -861,8 +861,29 @@ export function Scene({ telemetryRef, launched, vehicleId, selecting, quality = 
         }
 
         // ---- Descent/recovery chute ----
+        // Was gated on flight STAGE alone ('apogee' | 'descent'), which
+        // shows the chute model for the entire descent regardless of
+        // whether it has actually deployed in the physics (chuteState
+        // 0/1/2 from rocketPhysics.ts) -- so a flight that never deployed
+        // at all (the bug the forced 100m trigger exists to catch) looked
+        // visually identical to one that did. Gated on chuteState now, and
+        // scaled from 0 to full size as it deploys so there's a visible
+        // "pop open" moment rather than an instant on/off.
         if (chuteRef.current) {
-          chuteRef.current.visible = telemetry.stage === 'apogee' || telemetry.stage === 'descent'
+          const deployed = telemetry.chuteState > 0
+          chuteRef.current.visible = deployed
+          if (deployed) {
+            // 0 -> 1 over ~0.6s of game-visible scale-up; independent of
+            // the physics engine's own (longer) aerodynamic inflation
+            // curve -- this is purely a render polish cue, not a stand-in
+            // for chuteCdS.
+            const target = 1
+            chuteRef.current.scale.setScalar(
+              THREE.MathUtils.lerp(chuteRef.current.scale.x, target, 0.12)
+            )
+          } else {
+            chuteRef.current.scale.setScalar(0)
+          }
         }
 
         // ---- Dynamic chase camera ----
