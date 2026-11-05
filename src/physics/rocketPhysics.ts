@@ -336,6 +336,17 @@ const MAIN_Q_MAX = 1500
 const LAND_V_MAX = 9
 const LAND_TILT_MAX = 30 * RAD
 const LAND_SPIN_MAX = 45 * RAD
+// Exported in degrees/plain units (not radians) so postFlightReport.ts can
+// explain exactly which landed-vs-crashed threshold a flight violated,
+// using the SAME numbers touchdown() actually checks against — rather
+// than a second, independently-typed copy of 9/30/45 living in the report
+// module, which is exactly the kind of duplicated-constant drift the
+// ALTITUDE_SCALE centralization (constants/scale.ts) existed to prevent.
+export const LANDING_LIMITS = {
+  maxImpactSpeedMs: LAND_V_MAX,
+  maxTiltDeg: LAND_TILT_MAX * DEG,
+  maxSpinDegS: LAND_SPIN_MAX * DEG,
+}
 
 // ═══════════════════════════ wind ═══════════════════════════
 
@@ -438,6 +449,7 @@ export const EMPTY_TELEMETRY: Telemetry = {
   staticMargin: 0, centerOfGravity: 0, centerOfPressure: 0, momentOfInertia: 0,
   airDensity: 1.225, airPressure: 101325, airTemperature: 288.15, speedOfSound: 340.29,
   windSpeed: 0, cdAxial: 0, chuteState: 0, outcome: 'flying', impactSpeed: 0,
+  touchdownTilt: 0, touchdownSpin: 0,
 }
 
 // ═══════════════════════════ engine ═══════════════════════════
@@ -513,6 +525,11 @@ export class RocketPhysicsEngine {
   private outcome: 'flying' | 'landed' | 'crashed' = 'flying'
   private aborted = false
   private impactSpeed = 0
+  // Degrees — see touchdown()'s comment. Stay at 0 (their natural
+  // "never touched down" default) for the whole flight until touchdown()
+  // runs exactly once.
+  private touchdownTilt = 0
+  private touchdownSpin = 0
   private chuteState: 0 | 1 | 2 = 0
   private tDrogue = 0
   private tMain = 0
@@ -589,6 +606,8 @@ export class RocketPhysicsEngine {
     this.outcome = 'flying'
     this.aborted = false
     this.impactSpeed = 0
+    this.touchdownTilt = 0
+    this.touchdownSpin = 0
     this.chuteState = 0
     this.tDrogue = 0
     this.tMain = 0
@@ -1315,6 +1334,14 @@ export class RocketPhysicsEngine {
     const bodyDir = Q.qRotate(q, [0, 1, 0])
     const tiltFromVertical = Math.acos(clamp(bodyDir[1], -1, 1))
     const spin = V3.length([s[10], s[11], s[12]])
+    // Previously computed here and discarded once outcome was decided —
+    // kept now (in degrees, matching every other angle/rate field in
+    // Telemetry) so the post-flight report can explain WHICH threshold a
+    // crash actually violated (excess tilt vs. excess spin vs. excess
+    // impact speed) instead of only reporting the landed/crashed verdict
+    // itself.
+    this.touchdownTilt = tiltFromVertical * DEG
+    this.touchdownSpin = spin * DEG
     this.outcome =
       this.impactSpeed <= LAND_V_MAX && tiltFromVertical <= LAND_TILT_MAX && spin <= LAND_SPIN_MAX
         ? 'landed'
@@ -1437,6 +1464,8 @@ export class RocketPhysicsEngine {
       chuteState: this.chuteState,
       outcome: this.outcome,
       impactSpeed: round(this.impactSpeed),
+      touchdownTilt: round(this.touchdownTilt),
+      touchdownSpin: round(this.touchdownSpin),
     }
   }
 
