@@ -344,8 +344,13 @@ const LAND_SPIN_MAX = 45 * RAD
 // ALTITUDE_SCALE centralization (constants/scale.ts) existed to prevent.
 export const LANDING_LIMITS = {
   maxImpactSpeedMs: LAND_V_MAX,
-  maxTiltDeg: LAND_TILT_MAX * DEG,
-  maxSpinDegS: LAND_SPIN_MAX * DEG,
+  // Rounded here (not just in display formatting) because 30 * RAD * DEG
+  // round-trips through floating point to 29.999999999999996 — the actual
+  // physics check in touchdown() still compares against the exact
+  // LAND_TILT_MAX/LAND_SPIN_MAX radian constants above, unaffected by this;
+  // this rounding only cleans up the human-readable copy the report reads.
+  maxTiltDeg: Math.round(LAND_TILT_MAX * DEG),
+  maxSpinDegS: Math.round(LAND_SPIN_MAX * DEG),
 }
 
 // ═══════════════════════════ wind ═══════════════════════════
@@ -441,7 +446,7 @@ export const EMPTY_TELEMETRY: Telemetry = {
   gimbalAngle: 0, angleOfAttack: 0, dynamicPressure: 0, machNumber: 0,
   thrustNewtons: 0, throttle: 1, isp: 0, twr: 0, maxQ: 0, maxMach: 0, propellantRemaining: 0,
   axialGLoad: 0, lateralGLoad: 0,
-  airspeed: 0, flightPathAngle: 0, maxAltitude: 0,
+  airspeed: 0, flightPathAngle: 0, maxAltitude: 0, maxVelocity: 0,
   rcsFuel: 0, rcsTorque: 0, pitchRateCommand: 0, attitudeTarget: 0, gimbalCommand: 0,
   finAngle: 0, bodyLength: 0,
   positionZ: 0, velocityZ: 0, yawAngle: 0, rollAngle: 0, yawRate: 0, rollRate: 0,
@@ -520,6 +525,12 @@ export class RocketPhysicsEngine {
   private maxAltitude = 0
   private maxQ = 0
   private maxMach = 0
+  // Peak speed reached during the whole flight (3D, |v|, same metric as
+  // impactSpeed) — telemetry.velocity is the LIVE vertical speed, which
+  // reads ~0 right at touchdown/apogee, so the post-flight report needs
+  // its own tracked peak rather than reporting whatever velocity happened
+  // to be on the final tick.
+  private maxVelocity = 0
   private liftedOff = false
   private railCleared = false
   private outcome: 'flying' | 'landed' | 'crashed' = 'flying'
@@ -601,6 +612,7 @@ export class RocketPhysicsEngine {
     this.maxAltitude = 0
     this.maxQ = 0
     this.maxMach = 0
+    this.maxVelocity = 0
     this.liftedOff = false
     this.railCleared = false
     this.outcome = 'flying'
@@ -1073,6 +1085,7 @@ export class RocketPhysicsEngine {
     this.maxAltitude = Math.max(this.maxAltitude, s[1])
     this.maxQ = Math.max(this.maxQ, k1.dg.q)
     this.maxMach = Math.max(this.maxMach, k1.dg.mach)
+    this.maxVelocity = Math.max(this.maxVelocity, V3.length([s[3], s[4], s[5]]))
   }
 
   private addScaled(s: State13, d: State13, k: number): State13 {
@@ -1429,6 +1442,7 @@ export class RocketPhysicsEngine {
       airspeed: round(d.V),
       flightPathAngle: round(fpa),
       maxAltitude: round(this.maxAltitude),
+      maxVelocity: round(this.maxVelocity),
 
       rcsFuel: round(this.rcsGas, 3),
       rcsTorque: round(this.tauRcs[2]),

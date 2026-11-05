@@ -86,6 +86,7 @@ export interface Telemetry {
   airspeed: number         // m/s relative to the air mass
   flightPathAngle: number  // deg from vertical of the ground-relative velocity
   maxAltitude: number      // m
+  maxVelocity: number      // m/s, peak |v| (3D) reached during the whole flight
 
   // Flight computer / actuators
   rcsFuel: number          // kg of cold gas remaining
