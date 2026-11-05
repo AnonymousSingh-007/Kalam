@@ -237,7 +237,22 @@ export function Scene({ telemetryRef, launched, vehicleId, selecting, quality = 
   const cloudPassRef = useRef<CloudPass | null>(null)
   const groundResultRef = useRef<GroundResult | null>(null)
   const starMatRef = useRef<THREE.PointsMaterial | null>(null)
-  const chuteRef = useRef<THREE.Mesh | null>(null)
+  // The chute is a Group, not a single Mesh -- a canopy plus a riser line
+  // connecting it down to the rocket's nose, both parented to the SCENE
+  // directly rather than to the rocket. It used to be a child of the
+  // rocket body (rocket.add(chute)), which meant it inherited the body's
+  // full rotation: a tumbling or inverted vehicle (bodyAngle near 180°,
+  // as happens descending nose-first) pointed the "up" offset toward the
+  // ground and could hide the chute entirely inside/behind the body from
+  // the camera's view. Scene-parented and repositioned every frame from
+  // the rocket's actual world position instead, so the canopy always
+  // reads as "above the falling rocket" regardless of body attitude --
+  // matching how a real deployed parachute doesn't tumble with the
+  // vehicle beneath it.
+  const chuteRef = useRef<THREE.Group | null>(null)
+  const chuteCanopyRef = useRef<THREE.Mesh | null>(null)
+  const chuteRiserRef = useRef<THREE.Line | null>(null)
+  const chuteScaleRef = useRef(0)
   const rafRef = useRef<number>(0)
   const clockRef = useRef(new THREE.Clock())
 
@@ -536,11 +551,36 @@ export function Scene({ telemetryRef, launched, vehicleId, selecting, quality = 
     let rocketHeight = 6
     let rocketRadius = 0.36
     let model: VehicleModel | null = null
-    const chuteMat = new THREE.MeshStandardMaterial({ color: 0xdd5522, roughness: 0.8, metalness: 0.0 })
-    const chute = new THREE.Mesh(new THREE.ConeGeometry(0.25, 0.5, 12, 1, true), chuteMat)
-    chute.rotation.x = Math.PI
-    chute.visible = false
-    chuteRef.current = chute
+    // Canopy: a wide, shallow dome (hemisphere) rather than the old thin
+    // 0.25-radius/0.5-height cone -- that cone was genuinely too small to
+    // read against a 6-unit-tall rocket body even when it WAS positioned
+    // correctly, on top of the rotation-inheritance bug fixed above.
+    // Radius scales with rocketRadius so it still looks proportionate
+    // across different vehicle models, but has a sensible floor for the
+    // default/thin vehicles.
+    const chuteMat = new THREE.MeshStandardMaterial({
+      color: 0xdd5522, roughness: 0.9, metalness: 0.0, side: THREE.DoubleSide,
+    })
+    const chuteGroup = new THREE.Group()
+    const canopy = new THREE.Mesh(
+      new THREE.SphereGeometry(1, 16, 8, 0, Math.PI * 2, 0, Math.PI / 2),
+      chuteMat
+    )
+    // Dome opens downward (toward the rocket), flat side up.
+    canopy.rotation.x = Math.PI
+    chuteGroup.add(canopy)
+    const riserMat = new THREE.LineBasicMaterial({ color: 0x332018 })
+    const riserGeom = new THREE.BufferGeometry().setFromPoints([
+      new THREE.Vector3(0, 0, 0),
+      new THREE.Vector3(0, -1, 0),
+    ])
+    const riser = new THREE.Line(riserGeom, riserMat)
+    chuteGroup.add(riser)
+    chuteGroup.visible = false
+    scene.add(chuteGroup)
+    chuteRef.current = chuteGroup
+    chuteCanopyRef.current = canopy
+    chuteRiserRef.current = riser
 
     const swapVehicle = (id: VehicleId, q: QualityTier) => {
       // The plume is a child of nozzleGroup (see "---- Plume ----" below),
@@ -553,7 +593,6 @@ export function Scene({ telemetryRef, launched, vehicleId, selecting, quality = 
       if (plume) scene.add(plume)  // temporary parent so it survives the old model's disposal
 
       if (model) {
-        model.rocket.remove(chute)
         scene.remove(model.rocket)
         model.dispose()
       }
@@ -565,9 +604,16 @@ export function Scene({ telemetryRef, launched, vehicleId, selecting, quality = 
       rocketHeight = model.height
       const bb = new THREE.Box3().setFromObject(rocket)
       rocketRadius = Math.max(Math.abs(bb.min.x), bb.max.x, 0.3)
-      chute.position.y = rocketHeight + 0.3
-      chute.visible = false
-      rocket.add(chute)
+      // Scale the canopy and riser length to this vehicle's size -- a
+      // skinny strap-on vehicle and the broad Steel vehicle both get a
+      // proportionate, clearly visible chute. canopy/riser are scene-
+      // parented (see chuteRef's declaration above), so this is the
+      // mesh's own local scale, independent of the rocket's scale/rotation.
+      const canopyRadius = Math.max(rocketRadius * 2.2, 1.1)
+      chuteCanopyRef.current?.scale.setScalar(canopyRadius)
+      chuteRiserRef.current?.scale.setScalar(canopyRadius * 1.6)
+      chuteGroup.visible = false
+      chuteScaleRef.current = 0
 
       if (plume) model.nozzleGroup.add(plume)
     }
@@ -861,14 +907,26 @@ export function Scene({ telemetryRef, launched, vehicleId, selecting, quality = 
         }
 
         // ---- Descent/recovery chute ----
-        // Was gated on flight STAGE alone ('apogee' | 'descent'), which
-        // shows the chute model for the entire descent regardless of
-        // whether it has actually deployed in the physics (chuteState
-        // 0/1/2 from rocketPhysics.ts) -- so a flight that never deployed
-        // at all (the bug the forced 100m trigger exists to catch) looked
-        // visually identical to one that did. Gated on chuteState now, and
-        // scaled from 0 to full size as it deploys so there's a visible
-        // "pop open" moment rather than an instant on/off.
+        // Two bugs fixed here, stacked on each other:
+        //  1) Was gated on flight STAGE alone ('apogee' | 'descent'), not
+        //     on chuteState (0/1/2) from the physics -- so it showed for
+        //     the entire descent whether or not a chute had actually
+        //     deployed, and a flight that never deployed at all (the bug
+        //     the forced 100m trigger exists to catch) looked visually
+        //     identical to one that did.
+        //  2) It was a CHILD of the rocket body (rocket.add(chute)), so it
+        //     inherited the body's full rotation. A vehicle descending
+        //     nose-down (bodyAngle/AoA near 180°, which is the NORMAL
+        //     unpowered-descent attitude for this vehicle, not a
+        //     malfunction) pointed the chute's local "above the rocket"
+        //     offset toward the ground, putting it behind/inside the body
+        //     from the camera's view -- so even a successful deployment
+        //     was invisible. Fixed by parenting chuteGroup to the scene
+        //     directly (see its creation above) and computing its world
+        //     position here from the rocket's own world transform, with a
+        //     FIXED upward offset regardless of body attitude -- a real
+        //     deployed canopy doesn't tumble with the vehicle hanging
+        //     beneath it either.
         if (chuteRef.current) {
           const deployed = telemetry.chuteState > 0
           chuteRef.current.visible = deployed
@@ -877,12 +935,22 @@ export function Scene({ telemetryRef, launched, vehicleId, selecting, quality = 
             // the physics engine's own (longer) aerodynamic inflation
             // curve -- this is purely a render polish cue, not a stand-in
             // for chuteCdS.
-            const target = 1
-            chuteRef.current.scale.setScalar(
-              THREE.MathUtils.lerp(chuteRef.current.scale.x, target, 0.12)
-            )
-          } else {
-            chuteRef.current.scale.setScalar(0)
+            chuteScaleRef.current = THREE.MathUtils.lerp(chuteScaleRef.current, 1, 0.12)
+            chuteRef.current.scale.setScalar(chuteScaleRef.current)
+
+            // Nose-tip world position: the rocket's CG-relative pose
+            // (phi, cgFromBase) applied the same way r.position was
+            // derived above, projected out to the nose instead of the CG.
+            // riserLenWorld matches the riser mesh's own local length (1
+            // unit) times its per-vehicle scale set in swapVehicle, so the
+            // canopy always sits exactly at the top of the drawn line.
+            const noseFromBase = rocketHeight
+            const noseX = cgX + noseFromBase * Math.sin(phi)
+            const noseY = cgY - noseFromBase * Math.cos(phi)
+            const riserLenWorld = chuteRiserRef.current
+              ? chuteRiserRef.current.scale.y
+              : rocketHeight * 0.6
+            chuteRef.current.position.set(noseX, noseY + riserLenWorld, r.position.z)
           }
         }
 
