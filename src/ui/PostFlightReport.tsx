@@ -8,6 +8,7 @@
  * component just lays the result out.
  */
 import type { PostFlightReport } from '../postFlightReport'
+import { FlightDashboard } from './FlightDashboard'
 
 interface Props {
   report: PostFlightReport
@@ -24,7 +25,10 @@ export function PostFlightReportPanel({ report, onClose, onFlyAgain }: Props) {
         <div className="report-header">
           <span
             className="report-badge"
-            style={{ background: isGood ? '#1b7a3d' : '#b00020' }}
+            style={{
+              background: isGood ? '#00f0ff' : '#ff2bd6',
+              color: isGood ? '#04141a' : '#1a0414',
+            }}
           >
             {report.wasAborted ? 'ABORTED' : report.outcome === 'landed' ? 'LANDED' : 'CRASHED'}
           </span>
@@ -43,6 +47,13 @@ export function PostFlightReportPanel({ report, onClose, onFlyAgain }: Props) {
             ))}
           </div>
         </section>
+
+        {report.series.length > 0 && (
+          <section className="report-section">
+            <h3>Flight Telemetry</h3>
+            <FlightDashboard series={report.series} phases={report.phases} />
+          </section>
+        )}
 
         <section className="report-section">
           <h3>Feedback</h3>
