@@ -14,7 +14,10 @@ import { VEHICLES } from './render/buildRocket'
 import { GestureDetector, raisedHandPitch, debugRaiseY } from './hand/gestures'
 import { FixedStepDriver } from './renderInterp'
 import type { CountdownState, Telemetry, RocketParams } from './types'
+import { generateReport } from './postFlightReport'
+import { PostFlightReportPanel } from './ui/PostFlightReport'
 import './App.css'
+import './PostFlightReport.css'
 
 const machine = new CountdownMachine()
 const gestures = new GestureDetector()
@@ -46,6 +49,20 @@ function App() {
   // max-Q, events) get queued here — periodic filler is dropped instead,
   // since another filler line follows within a few seconds regardless.
   const pendingImportantRef = useRef<string | null>(null)
+  // True once this flight's landed/crashed telemetry has been captured —
+  // guards against re-capturing on every subsequent tick after touchdown
+  // (outcome stays 'landed'/'crashed' for the rest of the frozen
+  // post-touchdown state, see rocketPhysics.ts's touchdown(), so without
+  // this guard the capture below would fire repeatedly, not once).
+  const reportCapturedRef = useRef(false)
+  // Mirrors the abortMessage state (set at the same two call sites) so
+  // the report-capture code below can read the CURRENT abort reason
+  // synchronously within the same loop() call that set it — React state
+  // updates are batched, so reading the `abortMessage` closure variable
+  // in the same synchronous block that just called setAbortMessage would
+  // still see the previous render's (stale) value, same reasoning as why
+  // pendingImportantRef is a ref and not state.
+  const abortMessageRef = useRef<string | null>(null)
 
   const [vehicleIndex, setVehicleIndex] = useState(1)
   const [lastGesture, setLastGesture] = useState('')
@@ -57,6 +74,17 @@ function App() {
   const [commentary, setCommentary] = useState('')
   const [telemetryDisplay, setTelemetryDisplay] = useState<Telemetry | null>(null)
   const [abortMessage, setAbortMessage] = useState('')
+  // The exact Telemetry tick captured the instant outcome transitioned to
+  // 'landed' or 'crashed' — not the live/interpolated telemetryDisplay,
+  // which keeps updating after touchdown isn't physically meaningful
+  // (the state is frozen, but re-deriving a report from a later poll
+  // would just be reading the same frozen numbers through an extra
+  // layer). null until a flight actually ends this way.
+  const [finishedTelemetry, setFinishedTelemetry] = useState<Telemetry | null>(null)
+  const [finishedParams, setFinishedParams] = useState<RocketParams | null>(null)
+  const [finishedAbortMessage, setFinishedAbortMessage] = useState<string | null>(null)
+  const [showReportPrompt, setShowReportPrompt] = useState(false)
+  const [showReport, setShowReport] = useState(false)
 
   useEffect(() => {
     machine.onChange(setState)
@@ -250,6 +278,7 @@ function App() {
               const verdict = checkWatchdog(t)
               if (verdict) {
                 engineRef.current.abort()
+                abortMessageRef.current = verdict.message
                 setAbortMessage(verdict.message)
                 setCommentary(`FLIGHT TERMINATION: ${verdict.message}`)
                 continue
@@ -285,6 +314,22 @@ function App() {
               setCommentary((prev) =>
                 prev || commentaryEngineRef.current.fireLanded(t)
               )
+            }
+
+            // Post-flight report capture — fires exactly once, the first
+            // raw tick whose outcome is no longer 'flying'. Deliberately
+            // reads `t` (the raw tick), never the interpolated render
+            // snapshot, for the same reason the watchdog/commentary logic
+            // above does: outcome is a discrete state, and lerping toward
+            // it has no meaning. abortMessage is read from the ref-backed
+            // state captured above in this same loop body, not re-derived,
+            // so a report for an aborted flight always shows the exact
+            // message that triggered the abort.
+            if (!reportCapturedRef.current && t.outcome !== 'flying') {
+              reportCapturedRef.current = true
+              setFinishedTelemetry(t)
+              setFinishedAbortMessage(abortMessageRef.current)
+              setShowReportPrompt(true)
             }
           }
 
@@ -327,6 +372,21 @@ function App() {
     window.speechSynthesis.speak(utterance)
   }, [commentary])
 
+  // "Fly again": tear down the finished flight's report state and send the
+  // countdown machine back through idle to selecting, exactly like the
+  // app's very first entry into vehicle selection. Doesn't touch
+  // engineRef/launched directly — selecting a vehicle and re-launching via
+  // handleLaunch already resets those in the normal flow.
+  function handleFlyAgain() {
+    setShowReport(false)
+    setShowReportPrompt(false)
+    setFinishedTelemetry(null)
+    setFinishedAbortMessage(null)
+    setLaunched(false)
+    machine.reset()
+    machine.start()
+  }
+
   function handleLaunch(params: RocketParams) {
     if (state.phase !== 'armed') return
 
@@ -353,6 +413,17 @@ function App() {
     setAbortMessage('')
     commentaryEngineRef.current.reset()
     pendingImportantRef.current = null
+    // Fresh flight — clear any report/prompt left over from the previous
+    // one, and un-arm the capture guard so this new flight's own
+    // landed/crashed transition gets captured (not skipped as if it were
+    // a stale repeat of the last flight's touchdown).
+    reportCapturedRef.current = false
+    abortMessageRef.current = null
+    setFinishedTelemetry(null)
+    setFinishedParams(params)
+    setFinishedAbortMessage(null)
+    setShowReportPrompt(false)
+    setShowReport(false)
     if ('speechSynthesis' in window) window.speechSynthesis.cancel()
     const snap = engine.snapshot()
     setCommentary(commentaryEngineRef.current.firePreLaunch(snap))
@@ -422,6 +493,15 @@ function App() {
           {commentary && launched && (
             <div className="commentary-caption">{commentary}</div>
           )}
+
+          {showReportPrompt && !showReport && (
+            <button
+              className="report-prompt-button"
+              onClick={() => setShowReport(true)}
+            >
+              View post-flight report
+            </button>
+          )}
         </div>
 
         <aside className="side-dock">
@@ -443,6 +523,14 @@ function App() {
           )}
         </aside>
       </main>
+
+      {showReport && finishedTelemetry && finishedParams && (
+        <PostFlightReportPanel
+          report={generateReport(finishedTelemetry, finishedParams, finishedAbortMessage)}
+          onClose={() => setShowReport(false)}
+          onFlyAgain={handleFlyAgain}
+        />
+      )}
     </div>
   )
 }
