@@ -609,14 +609,26 @@ export function Scene({ telemetryRef, launched, vehicleId, selecting, quality = 
       rocketHeight = model.height
       const bb = new THREE.Box3().setFromObject(rocket)
       rocketRadius = Math.max(Math.abs(bb.min.x), bb.max.x, 0.3)
-      // Scale the canopy and riser length to this vehicle's size -- a
-      // skinny strap-on vehicle and the broad Steel vehicle both get a
-      // proportionate, clearly visible chute. canopy/riser are scene-
-      // parented (see chuteRef's declaration above), so this is the
-      // mesh's own local scale, independent of the rocket's scale/rotation.
+      // Scale the canopy to this vehicle's size -- a skinny strap-on
+      // vehicle and the broad Steel vehicle both get a proportionate,
+      // clearly visible chute. canopy/riser are scene-parented (see
+      // chuteRef's declaration above), so this is the mesh's own local
+      // scale, independent of the rocket's scale/rotation.
       const canopyRadius = Math.max(rocketRadius * 2.2, 1.1)
       chuteCanopyRef.current?.scale.setScalar(canopyRadius)
-      chuteRiserLenRef.current = canopyRadius * 1.6
+      // Riser length was previously derived from canopyRadius (rocket
+      // WIDTH), which for a typical thin rocket (radius ~0.3-0.5) came out
+      // to just ~1.1-1.8 scene units -- a sliver next to a 5-6-unit-tall
+      // rocket, so the canopy ended up hanging barely above the CG,
+      // overlapping the mid-body exactly as reported ("appearing from the
+      // middle of the rocket"). Sized off rocketHeight instead (the
+      // rocket's actual scene-space length, already known not to be a
+      // sliver), generous enough that the gap between nose and canopy
+      // reads clearly at the zoom level this game actually plays at --
+      // "a few feet" in real units is sub-pixel at this render scale (see
+      // ALTITUDE_SCALE), so this is sized for on-screen legibility, not a
+      // literal unit conversion.
+      chuteRiserLenRef.current = Math.max(rocketHeight * 0.9, 2.5)
       chuteGroup.visible = false
       chuteScaleRef.current = 0
 
@@ -942,36 +954,61 @@ export function Scene({ telemetryRef, launched, vehicleId, selecting, quality = 
           const deployed = telemetry.chuteState > 0
           chuteRef.current.visible = deployed
           if (deployed) {
-            // 0 -> 1 over ~0.6s of game-visible scale-up; independent of
-            // the physics engine's own (longer) aerodynamic inflation
+            // Target scale depends on WHICH stage is actually open, not
+            // just whether anything is open. chuteState 1 is drogue-only
+            // in the physics (rocketPhysics.ts's DROGUE_FRACTION = 2.5% of
+            // full canopy area) -- this used to scale to the same full
+            // size (1) for chuteState 1 and 2 alike, so a drogue-only
+            // deploy at apogee (8000m+, exactly what staged drogue is
+            // supposed to look like) rendered as a fully-open main chute,
+            // reading as "it deployed way too high." Small-but-visible for
+            // drogue, full size for main/forced, so what's on screen
+            // actually matches which chute is open.
+            const DROGUE_VISUAL_SCALE = 0.3
+            const target = telemetry.chuteState === 1 ? DROGUE_VISUAL_SCALE : 1
+            // 0 -> target over ~0.6s of game-visible scale-up; independent
+            // of the physics engine's own (longer) aerodynamic inflation
             // curve -- this is purely a render polish cue, not a stand-in
-            // for chuteCdS.
-            chuteScaleRef.current = THREE.MathUtils.lerp(chuteScaleRef.current, 1, 0.12)
+            // for chuteCdS. Also re-lerps correctly on the 1->2 transition
+            // (drogue size -> full size) since chuteScaleRef just keeps
+            // chasing whatever the current target is.
+            chuteScaleRef.current = THREE.MathUtils.lerp(chuteScaleRef.current, target, 0.12)
             chuteRef.current.scale.setScalar(chuteScaleRef.current)
 
             // Canopy hangs a FIXED world-space distance straight up (world
-            // +Y, no phi/trig) from the CG -- this vehicle's riser length,
-            // set once in swapVehicle. Using world Y rather than the body's
-            // local "up" is the actual fix: the body can be at any
-            // attitude (upright, nose-down, lying flat after a crash) and
-            // the canopy still sits directly above the vehicle on screen.
+            // +Y, no phi/trig) from the NOSE, not the CG and not the base
+            // -- r.position is the rocket's BASE/tail (see the pose block
+            // above: the group's origin is the base, the CG is derived
+            // from it), so anchoring the riser offset at r.position.y
+            // directly was actually measuring from the tail. With the old
+            // small riserLen (~1.1-1.8 units, see swapVehicle) that landed
+            // the canopy around the rocket's own mid-body on a ~5-6 unit
+            // rocket -- precisely "appearing from the middle of the
+            // rocket" as reported. noseY = base + full rocketHeight is the
+            // actual nose tip in world Y (consistent with how rocketHeight
+            // is used everywhere else in this file); the canopy then hangs
+            // riserLen above THAT. Using world Y rather than the body's
+            // local "up" is still the right call for attitude-independence
+            // (upright, nose-down, lying flat after a crash all look
+            // right), it was just anchored to the wrong end of the rocket.
+            const noseY = r.position.y + rocketHeight
             const riserLen = chuteRiserLenRef.current
-            chuteRef.current.position.set(r.position.x, r.position.y + riserLen, r.position.z)
+            chuteRef.current.position.set(r.position.x, noseY + riserLen, r.position.z)
 
-            // Re-aim the riser line from the canopy down to the CG every
-            // frame (direction AND length), rather than assuming straight
-            // down -- harmless duplicate work while the canopy sits
-            // directly above the CG (as it does right now, by
+            // Re-aim the riser line from the canopy down to the nose tip
+            // every frame (direction AND length), rather than assuming
+            // straight down -- harmless duplicate work while the canopy
+            // sits directly above the nose (as it does right now, by
             // construction), but keeps the line correct without
             // rebuilding geometry if the two points are ever allowed to
             // diverge (lateral sway, wind drift on the canopy, etc. --
             // not implemented yet, but this makes adding it later safe).
             if (chuteRiserRef.current) {
-              const toCG = new THREE.Vector3(0, -riserLen, 0) // CG is directly below by construction above
+              const toNose = new THREE.Vector3(0, -riserLen, 0) // nose is directly below by construction above
               chuteRiserRef.current.scale.set(1, riserLen, 1)
               chuteRiserRef.current.quaternion.setFromUnitVectors(
                 new THREE.Vector3(0, -1, 0),
-                toCG.clone().normalize()
+                toNose.clone().normalize()
               )
             }
           }
