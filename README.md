@@ -319,7 +319,7 @@ The cold-gas thrusters' torque authority (`tauRcsMax`, `tauRcsMaxRoll`) is a veh
 | Flight computer | `pitchRateCommand`, `attitudeTarget`, `gimbalCommand`, `rcsFuel`, `rcsTorque` (pitch), `rcsTorqueYaw`, `rcsTorqueRoll` |
 | Vehicle | `staticMargin`, `centerOfGravity`, `centerOfPressure`, `momentOfInertia` (pitch/yaw), `bodyLength` |
 | Environment | `airDensity`, `airPressure`, `airTemperature`, `speedOfSound`, `windSpeed` |
-| Recovery and outcome | `chuteState` (0 stowed, 1 drogue, 2 main), `outcome` (`flying`, `landed`, `crashed`), `impactSpeed` |
+| Recovery and outcome | `chuteState` (0 stowed, 1 main deployed), `outcome` (`flying`, `landed`, `crashed`), `impactSpeed` |
 
 `EMPTY_TELEMETRY` is exported from the physics module and is used for pre-launch display. `bodyAngle`, `angularVelocity`, `gimbalAngle`, `finAngle` and `rcsTorque` keep their exact original meaning (pitch) from the pre-6-DOF model — the 6-DOF fields above are purely additive, so nothing downstream broke when they were introduced.
 
