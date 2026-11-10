@@ -253,6 +253,11 @@ export function Scene({ telemetryRef, launched, vehicleId, selecting, quality = 
   const chuteCanopyRef = useRef<THREE.Mesh | null>(null)
   const chuteRiserRef = useRef<THREE.Line | null>(null)
   const chuteScaleRef = useRef(0)
+  // The riser mesh's own scale is re-aimed every frame (length AND
+  // direction, toward wherever the CG currently is), so it can't also
+  // double as "this vehicle's fixed riser length" -- that constant, set
+  // once per vehicle in swapVehicle, is stored here instead.
+  const chuteRiserLenRef = useRef(1)
   const rafRef = useRef<number>(0)
   const clockRef = useRef(new THREE.Clock())
 
@@ -611,7 +616,7 @@ export function Scene({ telemetryRef, launched, vehicleId, selecting, quality = 
       // mesh's own local scale, independent of the rocket's scale/rotation.
       const canopyRadius = Math.max(rocketRadius * 2.2, 1.1)
       chuteCanopyRef.current?.scale.setScalar(canopyRadius)
-      chuteRiserRef.current?.scale.setScalar(canopyRadius * 1.6)
+      chuteRiserLenRef.current = canopyRadius * 1.6
       chuteGroup.visible = false
       chuteScaleRef.current = 0
 
@@ -907,26 +912,32 @@ export function Scene({ telemetryRef, launched, vehicleId, selecting, quality = 
         }
 
         // ---- Descent/recovery chute ----
-        // Two bugs fixed here, stacked on each other:
+        // Three bugs found and fixed here, stacked on each other:
         //  1) Was gated on flight STAGE alone ('apogee' | 'descent'), not
-        //     on chuteState (0/1/2) from the physics -- so it showed for
-        //     the entire descent whether or not a chute had actually
-        //     deployed, and a flight that never deployed at all (the bug
-        //     the forced 100m trigger exists to catch) looked visually
-        //     identical to one that did.
+        //     on chuteState (0/1/2) from the physics -- showed for the
+        //     whole descent whether or not a chute had actually deployed.
         //  2) It was a CHILD of the rocket body (rocket.add(chute)), so it
-        //     inherited the body's full rotation. A vehicle descending
-        //     nose-down (bodyAngle/AoA near 180°, which is the NORMAL
-        //     unpowered-descent attitude for this vehicle, not a
-        //     malfunction) pointed the chute's local "above the rocket"
-        //     offset toward the ground, putting it behind/inside the body
-        //     from the camera's view -- so even a successful deployment
-        //     was invisible. Fixed by parenting chuteGroup to the scene
-        //     directly (see its creation above) and computing its world
-        //     position here from the rocket's own world transform, with a
-        //     FIXED upward offset regardless of body attitude -- a real
-        //     deployed canopy doesn't tumble with the vehicle hanging
-        //     beneath it either.
+        //     inherited the body's full rotation -- a vehicle descending
+        //     nose-down (bodyAngle/AoA near 180°, the NORMAL unpowered-
+        //     descent attitude here, not a malfunction) pointed the
+        //     chute's local "above the rocket" offset toward the ground,
+        //     hiding it behind/inside the body.
+        //  3) The first fix for (2) scene-parented the chute correctly,
+        //     but then computed its position with
+        //     `cgX + noseFromBase * Math.sin(phi)` / `cgY - noseFromBase *
+        //     Math.cos(phi)` -- which is STILL rotating with the body via
+        //     phi, just applied to a different anchor point. At phi for a
+        //     180°/horizontal body this put the "nose" point straight
+        //     above the CG in world space while the actual rocket mesh
+        //     was lying flat and pointing sideways -- exactly the
+        //     disconnected floating-canopy result seen in testing. A
+        //     parachute's canopy doesn't track the body's long axis at
+        //     all; it orients to the airflow/gravity above the vehicle
+        //     regardless of how the body itself is tumbling. Fixed by
+        //     hanging the canopy a fixed WORLD-space distance straight up
+        //     (world +Y, no phi/trig at all) from the CG, and running the
+        //     riser from the CG to the canopy -- both correct for any
+        //     body attitude, including flat/horizontal/tumbling.
         if (chuteRef.current) {
           const deployed = telemetry.chuteState > 0
           chuteRef.current.visible = deployed
@@ -938,19 +949,31 @@ export function Scene({ telemetryRef, launched, vehicleId, selecting, quality = 
             chuteScaleRef.current = THREE.MathUtils.lerp(chuteScaleRef.current, 1, 0.12)
             chuteRef.current.scale.setScalar(chuteScaleRef.current)
 
-            // Nose-tip world position: the rocket's CG-relative pose
-            // (phi, cgFromBase) applied the same way r.position was
-            // derived above, projected out to the nose instead of the CG.
-            // riserLenWorld matches the riser mesh's own local length (1
-            // unit) times its per-vehicle scale set in swapVehicle, so the
-            // canopy always sits exactly at the top of the drawn line.
-            const noseFromBase = rocketHeight
-            const noseX = cgX + noseFromBase * Math.sin(phi)
-            const noseY = cgY - noseFromBase * Math.cos(phi)
-            const riserLenWorld = chuteRiserRef.current
-              ? chuteRiserRef.current.scale.y
-              : rocketHeight * 0.6
-            chuteRef.current.position.set(noseX, noseY + riserLenWorld, r.position.z)
+            // Canopy hangs a FIXED world-space distance straight up (world
+            // +Y, no phi/trig) from the CG -- this vehicle's riser length,
+            // set once in swapVehicle. Using world Y rather than the body's
+            // local "up" is the actual fix: the body can be at any
+            // attitude (upright, nose-down, lying flat after a crash) and
+            // the canopy still sits directly above the vehicle on screen.
+            const riserLen = chuteRiserLenRef.current
+            chuteRef.current.position.set(r.position.x, r.position.y + riserLen, r.position.z)
+
+            // Re-aim the riser line from the canopy down to the CG every
+            // frame (direction AND length), rather than assuming straight
+            // down -- harmless duplicate work while the canopy sits
+            // directly above the CG (as it does right now, by
+            // construction), but keeps the line correct without
+            // rebuilding geometry if the two points are ever allowed to
+            // diverge (lateral sway, wind drift on the canopy, etc. --
+            // not implemented yet, but this makes adding it later safe).
+            if (chuteRiserRef.current) {
+              const toCG = new THREE.Vector3(0, -riserLen, 0) // CG is directly below by construction above
+              chuteRiserRef.current.scale.set(1, riserLen, 1)
+              chuteRiserRef.current.quaternion.setFromUnitVectors(
+                new THREE.Vector3(0, -1, 0),
+                toCG.clone().normalize()
+              )
+            }
           }
         }
 
