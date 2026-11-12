@@ -1,5 +1,5 @@
 ﻿/**
- * inertialDynamics.ts â€” what the rocket's equations of motion need to know
+ * inertialDynamics.ts — what the rocket's equations of motion need to know
  * about Earth's rotation, given that they integrate in TRUE ECI.
  *
  * Part of the frames branch (feature/eci-ecef-frames). First subfolder
