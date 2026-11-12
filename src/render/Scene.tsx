@@ -237,27 +237,39 @@ export function Scene({ telemetryRef, launched, vehicleId, selecting, quality = 
   const cloudPassRef = useRef<CloudPass | null>(null)
   const groundResultRef = useRef<GroundResult | null>(null)
   const starMatRef = useRef<THREE.PointsMaterial | null>(null)
-  // The chute is a Group, not a single Mesh -- a canopy plus a riser line
-  // connecting it down to the rocket's nose, both parented to the SCENE
-  // directly rather than to the rocket. It used to be a child of the
-  // rocket body (rocket.add(chute)), which meant it inherited the body's
-  // full rotation: a tumbling or inverted vehicle (bodyAngle near 180°,
-  // as happens descending nose-first) pointed the "up" offset toward the
-  // ground and could hide the chute entirely inside/behind the body from
-  // the camera's view. Scene-parented and repositioned every frame from
-  // the rocket's actual world position instead, so the canopy always
-  // reads as "above the falling rocket" regardless of body attitude --
-  // matching how a real deployed parachute doesn't tumble with the
-  // vehicle beneath it.
+  // Simulated recovery rig: a canopy Group (dome mesh) plus N suspension-
+  // line cylinders converging to one riser attachment at the rocket's
+  // nose. Everything here is parented to the SCENE directly, not to the
+  // rocket body -- it used to be a rocket child, which meant it inherited
+  // the body's full rotation: a tumbling or nose-down vehicle pointed the
+  // "up" offset toward the ground and hid the chute behind/inside the
+  // body.
+  //
+  // "Simulated" means the canopy doesn't just snap to a fixed offset
+  // above the rocket -- chuteWorldPosRef/chuteWorldUpRef are a damped
+  // spring target the canopy eases toward each frame, so a swinging or
+  // tumbling body visibly drags the canopy's position (with lag) and the
+  // canopy's own orientation independently eases toward "airflow-aligned"
+  // (world up) rather than snapping there instantly or inheriting body
+  // roll. The suspension lines are real CylinderGeometry, stretched and
+  // aimed fresh every frame between each rim point and the nose -- not
+  // THREE.Line (1px, no thickness control in WebGL, which is why the
+  // single riser line in the previous version always read as "just a
+  // black line" no matter what color/width was set on it).
   const chuteRef = useRef<THREE.Group | null>(null)
   const chuteCanopyRef = useRef<THREE.Mesh | null>(null)
-  const chuteRiserRef = useRef<THREE.Line | null>(null)
+  const chuteLinesRef = useRef<THREE.Mesh[]>([])
   const chuteScaleRef = useRef(0)
-  // The riser mesh's own scale is re-aimed every frame (length AND
-  // direction, toward wherever the CG currently is), so it can't also
-  // double as "this vehicle's fixed riser length" -- that constant, set
-  // once per vehicle in swapVehicle, is stored here instead.
+  // This vehicle's fixed riser length (nose to canopy, at full extension),
+  // set once per vehicle in swapVehicle from rocketHeight.
   const chuteRiserLenRef = useRef(1)
+  // Damped-spring state for the simulated rig -- current (eased) world
+  // position and up-vector of the canopy, chasing a fresh target computed
+  // from the rocket's live pose every frame. Not reset to the target
+  // instantly, which is what gives the "rig" its lag/sway rather than a
+  // canopy rigidly glued above the nose.
+  const chutePosRef = useRef(new THREE.Vector3())
+  const chuteUpRef = useRef(new THREE.Vector3(0, 1, 0))
   const rafRef = useRef<number>(0)
   const clockRef = useRef(new THREE.Clock())
 
@@ -556,36 +568,59 @@ export function Scene({ telemetryRef, launched, vehicleId, selecting, quality = 
     let rocketHeight = 6
     let rocketRadius = 0.36
     let model: VehicleModel | null = null
-    // Canopy: a wide, shallow dome (hemisphere) rather than the old thin
-    // 0.25-radius/0.5-height cone -- that cone was genuinely too small to
-    // read against a 6-unit-tall rocket body even when it WAS positioned
-    // correctly, on top of the rotation-inheritance bug fixed above.
-    // Radius scales with rocketRadius so it still looks proportionate
-    // across different vehicle models, but has a sensible floor for the
-    // default/thin vehicles.
+
+    // ---- Recovery parachute: round canopy + simulated suspension lines ----
+    // Round conventional canopy: a hemisphere with its DOME facing up/away
+    // from the rocket and its open skirt facing down toward it -- i.e. the
+    // natural orientation of SphereGeometry's upper hemisphere (theta 0 to
+    // PI/2), with NO extra rotation applied. The previous version applied
+    // `canopy.rotation.x = Math.PI` on top of that upper-hemisphere
+    // geometry specifically to "face it down," which instead flipped the
+    // dome to point its flat cut-face up and its curve down -- the
+    // upside-down/inverted look reported. Removing that rotation is the
+    // actual fix; the geometry was already correct as built.
+    const CANOPY_SEGMENTS = 12
     const chuteMat = new THREE.MeshStandardMaterial({
       color: 0xdd5522, roughness: 0.9, metalness: 0.0, side: THREE.DoubleSide,
     })
     const chuteGroup = new THREE.Group()
     const canopy = new THREE.Mesh(
-      new THREE.SphereGeometry(1, 16, 8, 0, Math.PI * 2, 0, Math.PI / 2),
+      new THREE.SphereGeometry(1, CANOPY_SEGMENTS, 8, 0, Math.PI * 2, 0, Math.PI / 2),
       chuteMat
     )
-    // Dome opens downward (toward the rocket), flat side up.
-    canopy.rotation.x = Math.PI
     chuteGroup.add(canopy)
-    const riserMat = new THREE.LineBasicMaterial({ color: 0x332018 })
-    const riserGeom = new THREE.BufferGeometry().setFromPoints([
-      new THREE.Vector3(0, 0, 0),
-      new THREE.Vector3(0, -1, 0),
-    ])
-    const riser = new THREE.Line(riserGeom, riserMat)
-    chuteGroup.add(riser)
+    // Gore seams: a wireframe overlay traces the same hemisphere's
+    // longitude lines, reading as the radial fabric-panel seams a real
+    // round canopy has, without building custom gored geometry.
+    const seamMat = new THREE.LineBasicMaterial({ color: 0x5a2a16, transparent: true, opacity: 0.55 })
+    const seams = new THREE.LineSegments(
+      new THREE.WireframeGeometry(new THREE.SphereGeometry(1.002, CANOPY_SEGMENTS, 4, 0, Math.PI * 2, 0, Math.PI / 2)),
+      seamMat
+    )
+    chuteGroup.add(seams)
+
+    // Suspension lines: real CylinderGeometry (not THREE.Line, which in
+    // WebGL has no usable width control and reads as a flat 1px stroke no
+    // matter what's set on it -- the "just a black line" complaint). Each
+    // is a thin cylinder stretched and aimed fresh every frame between a
+    // rim point on the canopy skirt and the single riser attachment at the
+    // rocket's nose, giving it visible, lit geometry/thickness like a real
+    // cord bundle.
+    const LINE_COUNT = 8
+    const lineMat = new THREE.MeshStandardMaterial({ color: 0x3a2518, roughness: 0.8 })
+    const lineGeom = new THREE.CylinderGeometry(1, 1, 1, 5, 1, true)
+    const lines: THREE.Mesh[] = []
+    for (let i = 0; i < LINE_COUNT; i++) {
+      const line = new THREE.Mesh(lineGeom, lineMat)
+      scene.add(line) // scene-parented like the canopy, aimed in world space every frame
+      lines.push(line)
+    }
+
     chuteGroup.visible = false
     scene.add(chuteGroup)
     chuteRef.current = chuteGroup
     chuteCanopyRef.current = canopy
-    chuteRiserRef.current = riser
+    chuteLinesRef.current = lines
 
     const swapVehicle = (id: VehicleId, q: QualityTier) => {
       // The plume is a child of nozzleGroup (see "---- Plume ----" below),
@@ -616,6 +651,7 @@ export function Scene({ telemetryRef, launched, vehicleId, selecting, quality = 
       // scale, independent of the rocket's scale/rotation.
       const canopyRadius = Math.max(rocketRadius * 2.2, 1.1)
       chuteCanopyRef.current?.scale.setScalar(canopyRadius)
+      seams.scale.setScalar(canopyRadius)
       // Riser length was previously derived from canopyRadius (rocket
       // WIDTH), which for a typical thin rocket (radius ~0.3-0.5) came out
       // to just ~1.1-1.8 scene units -- a sliver next to a 5-6-unit-tall
@@ -631,6 +667,12 @@ export function Scene({ telemetryRef, launched, vehicleId, selecting, quality = 
       chuteRiserLenRef.current = Math.max(rocketHeight * 0.9, 2.5)
       chuteGroup.visible = false
       chuteScaleRef.current = 0
+      // Reset the rig's spring state too -- otherwise a fresh launch could
+      // start the canopy easing in from wherever the LAST flight's chute
+      // ended up (e.g. down at the previous flight's crash site), a stray
+      // visible snap/drag across the whole map on the very first deploy.
+      chutePosRef.current.set(0, rocketHeight + chuteRiserLenRef.current, 0)
+      chuteUpRef.current.set(0, 1, 0)
 
       if (plume) model.nozzleGroup.add(plume)
     }
@@ -923,93 +965,85 @@ export function Scene({ telemetryRef, launched, vehicleId, selecting, quality = 
           ;(p.material as THREE.PointsMaterial).size = 0.15 + zoomFactor * 0.25
         }
 
-        // ---- Descent/recovery chute ----
-        // Three bugs found and fixed here, stacked on each other:
-        //  1) Was gated on flight STAGE alone ('apogee' | 'descent'), not
-        //     on chuteState (0/1/2) from the physics -- showed for the
-        //     whole descent whether or not a chute had actually deployed.
-        //  2) It was a CHILD of the rocket body (rocket.add(chute)), so it
-        //     inherited the body's full rotation -- a vehicle descending
-        //     nose-down (bodyAngle/AoA near 180°, the NORMAL unpowered-
-        //     descent attitude here, not a malfunction) pointed the
-        //     chute's local "above the rocket" offset toward the ground,
-        //     hiding it behind/inside the body.
-        //  3) The first fix for (2) scene-parented the chute correctly,
-        //     but then computed its position with
-        //     `cgX + noseFromBase * Math.sin(phi)` / `cgY - noseFromBase *
-        //     Math.cos(phi)` -- which is STILL rotating with the body via
-        //     phi, just applied to a different anchor point. At phi for a
-        //     180°/horizontal body this put the "nose" point straight
-        //     above the CG in world space while the actual rocket mesh
-        //     was lying flat and pointing sideways -- exactly the
-        //     disconnected floating-canopy result seen in testing. A
-        //     parachute's canopy doesn't track the body's long axis at
-        //     all; it orients to the airflow/gravity above the vehicle
-        //     regardless of how the body itself is tumbling. Fixed by
-        //     hanging the canopy a fixed WORLD-space distance straight up
-        //     (world +Y, no phi/trig at all) from the CG, and running the
-        //     riser from the CG to the canopy -- both correct for any
-        //     body attitude, including flat/horizontal/tumbling.
+        // ---- Descent/recovery chute (simulated rig) ----
+        // Main-only recovery now (chuteState is 0|1 -- see rocketPhysics.ts),
+        // so "deployed" is just chuteState === 1, no drogue/main distinction
+        // to render differently any more.
         if (chuteRef.current) {
-          const deployed = telemetry.chuteState > 0
+          const deployed = telemetry.chuteState === 1
           chuteRef.current.visible = deployed
+          for (const line of chuteLinesRef.current) line.visible = deployed
           if (deployed) {
-            // Target scale depends on WHICH stage is actually open, not
-            // just whether anything is open. chuteState 1 is drogue-only
-            // in the physics (rocketPhysics.ts's DROGUE_FRACTION = 2.5% of
-            // full canopy area) -- this used to scale to the same full
-            // size (1) for chuteState 1 and 2 alike, so a drogue-only
-            // deploy at apogee (8000m+, exactly what staged drogue is
-            // supposed to look like) rendered as a fully-open main chute,
-            // reading as "it deployed way too high." Small-but-visible for
-            // drogue, full size for main/forced, so what's on screen
-            // actually matches which chute is open.
-            const DROGUE_VISUAL_SCALE = 0.3
-            const target = telemetry.chuteState === 1 ? DROGUE_VISUAL_SCALE : 1
-            // 0 -> target over ~0.6s of game-visible scale-up; independent
-            // of the physics engine's own (longer) aerodynamic inflation
-            // curve -- this is purely a render polish cue, not a stand-in
-            // for chuteCdS. Also re-lerps correctly on the 1->2 transition
-            // (drogue size -> full size) since chuteScaleRef just keeps
-            // chasing whatever the current target is.
-            chuteScaleRef.current = THREE.MathUtils.lerp(chuteScaleRef.current, target, 0.12)
+            // 0 -> 1 inflation scale over ~0.6s of game-visible scale-up;
+            // independent of the physics engine's own (longer) aerodynamic
+            // inflation curve -- this is purely a render polish cue, not a
+            // stand-in for chuteCdS.
+            chuteScaleRef.current = THREE.MathUtils.lerp(chuteScaleRef.current, 1, 0.12)
             chuteRef.current.scale.setScalar(chuteScaleRef.current)
 
-            // Canopy hangs a FIXED world-space distance straight up (world
-            // +Y, no phi/trig) from the NOSE, not the CG and not the base
-            // -- r.position is the rocket's BASE/tail (see the pose block
-            // above: the group's origin is the base, the CG is derived
-            // from it), so anchoring the riser offset at r.position.y
-            // directly was actually measuring from the tail. With the old
-            // small riserLen (~1.1-1.8 units, see swapVehicle) that landed
-            // the canopy around the rocket's own mid-body on a ~5-6 unit
-            // rocket -- precisely "appearing from the middle of the
-            // rocket" as reported. noseY = base + full rocketHeight is the
-            // actual nose tip in world Y (consistent with how rocketHeight
-            // is used everywhere else in this file); the canopy then hangs
-            // riserLen above THAT. Using world Y rather than the body's
-            // local "up" is still the right call for attitude-independence
-            // (upright, nose-down, lying flat after a crash all look
-            // right), it was just anchored to the wrong end of the rocket.
-            const noseY = r.position.y + rocketHeight
+            // Nose tip in world space -- r.position is the rocket's
+            // BASE/tail (see the pose block above: the group's origin is
+            // the base, the CG is derived from it going UP from there), so
+            // the nose is base + full rocketHeight along world Y. This is
+            // the one point the rig is actually anchored to; everything
+            // else below is relative to it.
+            const noseWorld = new THREE.Vector3(r.position.x, r.position.y + rocketHeight, r.position.z)
             const riserLen = chuteRiserLenRef.current
-            chuteRef.current.position.set(r.position.x, noseY + riserLen, r.position.z)
 
-            // Re-aim the riser line from the canopy down to the nose tip
-            // every frame (direction AND length), rather than assuming
-            // straight down -- harmless duplicate work while the canopy
-            // sits directly above the nose (as it does right now, by
-            // construction), but keeps the line correct without
-            // rebuilding geometry if the two points are ever allowed to
-            // diverge (lateral sway, wind drift on the canopy, etc. --
-            // not implemented yet, but this makes adding it later safe).
-            if (chuteRiserRef.current) {
-              const toNose = new THREE.Vector3(0, -riserLen, 0) // nose is directly below by construction above
-              chuteRiserRef.current.scale.set(1, riserLen, 1)
-              chuteRiserRef.current.quaternion.setFromUnitVectors(
-                new THREE.Vector3(0, -1, 0),
-                toNose.clone().normalize()
-              )
+            // ---- Simulated rig: spring-damped target, not a hard snap ----
+            // Target position: straight up (world +Y) from the nose by
+            // riserLen -- a real deployed canopy orients to airflow/gravity,
+            // not the body's long axis, so this deliberately ignores body
+            // attitude (phi) entirely, same reasoning as before. What's
+            // NEW is that the canopy doesn't jump straight to this target
+            // every frame -- it's eased toward it (chutePosRef), so a body
+            // swinging or tumbling underneath visibly drags the canopy
+            // with a short lag instead of the canopy teleporting rigidly
+            // in lockstep. Target orientation is always world-up (airflow-
+            // aligned); the canopy's CURRENT up-vector (chuteUpRef) eases
+            // toward that too, rather than inheriting body roll outright --
+            // so a rocket that's rolling or tumbling underneath doesn't
+            // spin the canopy with it, but a brief attitude change still
+            // reads as a small, settling wobble rather than an instant
+            // re-snap.
+            const targetPos = noseWorld.clone().add(new THREE.Vector3(0, riserLen, 0))
+            const targetUp = new THREE.Vector3(0, 1, 0)
+            // Lower damping factor than the pure-cosmetic scale lerp above
+            // -- this is the rig's actual sway/lag, so it's deliberately
+            // slower (more visible) than the inflation-scale animation.
+            chutePosRef.current.lerp(targetPos, 0.06)
+            chuteUpRef.current.lerp(targetUp, 0.08).normalize()
+            chuteRef.current.position.copy(chutePosRef.current)
+            chuteRef.current.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), chuteUpRef.current)
+
+            // ---- Suspension lines: real cylinder geometry, aimed live ----
+            // LINE_COUNT points evenly spaced around the canopy's rim
+            // (world space, using the canopy's EASED position/orientation
+            // above, not the raw target), each converging to the single
+            // riser attachment at the nose. Early in deployment
+            // (chuteScaleRef well below 1) the rim radius used here is
+            // scaled down with it, so the lines visibly start short/slack
+            // near the nose and lengthen out to full span as the canopy
+            // inflates -- the sag/tension cue -- rather than snapping to
+            // full-length taut lines the instant chuteState flips.
+            const lines = chuteLinesRef.current
+            const n = lines.length
+            const canopyRadiusWorld = (chuteCanopyRef.current?.scale.x ?? 1) * chuteScaleRef.current
+            const rightAxis = new THREE.Vector3(1, 0, 0).applyQuaternion(chuteRef.current.quaternion)
+            const fwdAxis = new THREE.Vector3(0, 0, 1).applyQuaternion(chuteRef.current.quaternion)
+            const LINE_RADIUS = 0.012
+            for (let i = 0; i < n; i++) {
+              const ang = (i / n) * Math.PI * 2
+              const rim = chutePosRef.current.clone()
+                .addScaledVector(rightAxis, Math.cos(ang) * canopyRadiusWorld)
+                .addScaledVector(fwdAxis, Math.sin(ang) * canopyRadiusWorld)
+              const seg = new THREE.Vector3().subVectors(noseWorld, rim)
+              const len = Math.max(seg.length(), 0.001)
+              const mid = rim.clone().addScaledVector(seg, 0.5)
+              const line = lines[i]
+              line.position.copy(mid)
+              line.scale.set(LINE_RADIUS, len, LINE_RADIUS)
+              line.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), seg.clone().normalize())
             }
           }
         }
