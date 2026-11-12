@@ -79,6 +79,8 @@ import type { Vec3 } from './vec3'
 import type { Quat } from './quat'
 import { EARTH_RADIUS_M } from '../constants/scale'
 import { PLANET_CENTER_IN_LAUNCH_SITE_FRAME } from '../constants/frames'
+import { LAUNCH_SITE_ECI_VELOCITY } from '../constants/launchSite'
+import { atmosphereEciVelocity } from './physics/inertialDynamics'
 
 // ═══════════════════════════ constants ═══════════════════════════
 
@@ -591,7 +593,16 @@ export class RocketPhysicsEngine {
     this.chuteMainArea =
       (2 * Math.max(params.dryMass, 1) * G0) / (1.225 * CD_CHUTE * 5.5 * 5.5)
 
-    this.s = [0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0]
+    // T-0 velocity is NOT zero: the pad is fixed to the rotating Earth, so
+    // a rocket sitting on it is already moving through true ECI space at
+    // the site's own rotational speed (see constants/launchSite.ts) —
+    // purely eastward (index 0 = East component of State13[3..5]) at this
+    // project's chosen launch latitude (Sriharikota, ~13.7N). Before the
+    // feature/eci-ecef-frames branch this was [0,0,0,0,0,0,...] throughout
+    // (implicitly treating "launch-site frame" as inertial AND starting at
+    // rest in it, which is now a fixed site-specific, non-zero vector
+    // instead of an assumption baked into the zero).
+    this.s = [0, 0, 0, LAUNCH_SITE_ECI_VELOCITY[0], LAUNCH_SITE_ECI_VELOCITY[1], LAUNCH_SITE_ECI_VELOCITY[2], 0, 0, 0, 1, 0, 0, 0]
     this.time = 0
     this.tLaunch = 0
     this.tBurnout = null
@@ -791,7 +802,19 @@ export class RocketPhysicsEngine {
 
     const atm = isa1976(p[1])
     const windX = this.windProfile(p[1]) + c.gust
-    const vRel: Vec3 = [v[0] - windX, v[1], v[2]]  // air-relative velocity, local frame
+    // The atmosphere co-rotates with the Earth (see
+    // physics/inertialDynamics.ts's header): "still air" has zero ECEF
+    // velocity but non-zero ECI velocity, equal to the local
+    // Earth-rotation-carried speed. v is now true ECI velocity (it
+    // includes LAUNCH_SITE_ECI_VELOCITY from T-0 onward), so the air it's
+    // actually moving through — for drag purposes — is the local
+    // atmosphere's own ECI velocity (co-rotation) plus the windX gust
+    // profile (which is itself defined relative to the co-rotating
+    // ground/air, not relative to the stars). Before this branch, vRel
+    // was just `v - windX`, correct only because v was never actually
+    // carrying any rotational speed to begin with.
+    const atmoEci = atmosphereEciVelocity(p, PLANET_CENTER_IN_LAUNCH_SITE_FRAME)
+    const vRel: Vec3 = [v[0] - atmoEci[0] - windX, v[1] - atmoEci[1], v[2] - atmoEci[2]]  // air-relative velocity, local frame
     const V = V3.length(vRel)
     const q_dyn = 0.5 * atm.rho * V * V
     const mach = V / atm.a
@@ -894,7 +917,7 @@ export class RocketPhysicsEngine {
     if (c.chuteCdS > 0) {
       const rNose: Vec3 = [0, xcg, 0]   // nose relative to CG, along +Y_body
       const vPointLocal = V3.add(v, Q.qRotate(q, V3.cross(w, rNose)))
-      const vaLocal: Vec3 = [vPointLocal[0] - windX, vPointLocal[1], vPointLocal[2]]
+      const vaLocal: Vec3 = [vPointLocal[0] - atmoEci[0] - windX, vPointLocal[1] - atmoEci[1], vPointLocal[2] - atmoEci[2]]
       const Va = V3.length(vaLocal)
       const k = 0.5 * atm.rho * Va * c.chuteCdS
       Fchute = V3.scale(vaLocal, -k)

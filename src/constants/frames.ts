@@ -46,9 +46,34 @@
  * for that factor (see scale.ts's own header for why). This file is about
  * frame ORIGIN and BASIS, scale.ts is about frame SCALE — composing them
  * is launchSiteToRender() below.
+ *
+ * UPDATE (feature/eci-ecef-frames branch): "LAUNCH-SITE FRAME" above is
+ * now understood as ECI WITH A TRANSLATED ORIGIN, not its own separate
+ * inertial concept. Earth's rotation is modeled starting this branch (see
+ * constants/earthRotation.ts and constants/launchSite.ts) — the frame
+ * rocketPhysics.ts actually integrates in (what State13[0..2]/[3..5] are)
+ * is a true Earth-Centered Inertial frame, just expressed with its origin
+ * placed at the pad and its basis fixed to the pad's local East/Up/North
+ * at t=0, rather than the standard ECI convention of origin-at-planet-
+ * centre with a basis fixed to the stars/equinox. Both are equally valid,
+ * equally inertial frames (a translated, fixed-orientation copy of an
+ * inertial frame is itself inertial) — "launch-site frame" was always
+ * this, it just didn't have a name for "which inertial frame" until this
+ * branch added ECEF as a second, genuinely different (rotating) frame to
+ * distinguish it from. EciPos/EciVel below are the properly-named aliases
+ * for what LaunchSitePos already was; LaunchSitePos is kept (not removed)
+ * since renaming it would touch every existing call site in
+ * rocketPhysics.ts/Scene.tsx for no behavioural change — new code in this
+ * branch should prefer the Eci* names since they say what the frame IS,
+ * but LaunchSitePos is not deprecated, just a synonym with an established
+ * meaning before this branch had the ECI/ECEF vocabulary to describe it
+ * precisely. See earthRotation.ts's header for what's actually NEW here:
+ * the rotating ECEF frame, and the explicit rotation between the two.
  */
 
 import { ALTITUDE_SCALE, EARTH_RADIUS_M, metresToScene } from './scale'
+import { siderealAngle, eciToEcefLocal, ecefToEciLocal } from './earthRotation'
+import { LAUNCH_SITE_POLAR_AXIS } from './launchSite'
 
 // ─────────────────────────── basis vectors ───────────────────────────
 
@@ -97,6 +122,31 @@ export type PlanetCenteredPos = Vec3Tuple & Branded<'planet-centered'>
  *  launch-site frame, scaled by ALTITUDE_SCALE. What Scene.tsx should
  *  hand to THREE.Object3D.position.set(...). */
 export type RenderPos = Vec3Tuple & Branded<'render'>
+
+/** A position in the true Earth-Centered Inertial frame, metres, with the
+ *  SAME origin-at-the-pad convention as LaunchSitePos (see this file's
+ *  header for why these are the same underlying frame). Prefer this name
+ *  in new code written as part of or after the feature/eci-ecef-frames
+ *  branch, since it says what the frame physically IS rather than where
+ *  its origin happens to sit. */
+export type EciPos = LaunchSitePos & Branded<'eci'>
+
+/** A velocity in the true ECI frame, metres/second, same basis as EciPos.
+ *  Velocities don't have a translatable "origin" the way positions do, so
+ *  this is NOT branded as a LaunchSitePos-compatible type — a velocity is
+ *  frame-basis-dependent but not frame-origin-dependent, and keeping that
+ *  distinction at the type level (rather than reusing EciPos's brand)
+ *  avoids a position and a velocity in the same basis being accidentally
+ *  type-compatible with each other, which they are NOT (you can't add a
+ *  position to a velocity and get something meaningful). */
+export type EciVel = Vec3Tuple & Branded<'eci-velocity'>
+
+/** A position in the Earth-Centered Earth-Fixed frame, metres, origin at
+ *  the planet's centre (matching PlanetCenteredPos's origin — ECEF and
+ *  the planet-centred frame share an origin, they differ only in
+ *  ORIENTATION: ECEF rotates with the Earth, planet-centred/ECI does
+ *  not). See earthRotation.ts for the rotation between this and ECI. */
+export type EcefPos = Vec3Tuple & Branded<'ecef'>
 
 // ─────────────────────────── constructors ───────────────────────────
 
@@ -158,6 +208,62 @@ export function renderToLaunchSite(p: RenderPos): LaunchSitePos {
  *  correct position relative to the pad in the render frame. */
 export function planetCenteredToRender(p: PlanetCenteredPos): RenderPos {
   return launchSiteToRender(planetCenteredToLaunchSite(p))
+}
+
+// ─────────────────────────── ECI <-> ECEF ───────────────────────────
+//
+// Added on the feature/eci-ecef-frames branch. Unlike every conversion
+// above (pure translation or pure scale, both time-independent), going
+// between ECI and ECEF needs the current sidereal angle theta(t) — see
+// earthRotation.ts's header for why — so every function here takes a
+// `missionElapsedSeconds` argument the translate/scale conversions don't
+// need. EciPos is a LaunchSitePos-compatible alias (see this file's header
+// update above for why they're the same underlying frame); EcefPos is a
+// genuinely new, planet-centred-origin, rotating-basis frame.
+//
+// Because EciPos shares LaunchSitePos's pad-relative origin while EcefPos
+// shares PlanetCenteredPos's planet-centre origin, converting between them
+// is translation AND rotation, not rotation alone — these functions
+// compose the existing launchSiteToPlanetCentered/planetCenteredToLaunchSite
+// translation with earthRotation.ts's rotation, in the order that keeps
+// each intermediate step physically meaningful (translate to a
+// planet-centred origin first, since the rotation axis passes through the
+// planet's centre, not the pad).
+
+/** EciPos (pad-origin inertial) -> EcefPos (planet-centre-origin, rotating
+ *  with the Earth), at sidereal time `missionElapsedSeconds` since this
+ *  flight's own t=0. */
+export function eciToEcef(p: EciPos, missionElapsedSeconds: number): EcefPos {
+  const centred = launchSiteToPlanetCentered(p as LaunchSitePos)
+  const theta = siderealAngle(missionElapsedSeconds)
+  return eciToEcefLocal(centred, LAUNCH_SITE_POLAR_AXIS, theta) as EcefPos
+}
+
+/** The inverse of eciToEcef(): EcefPos -> EciPos at the same sidereal time. */
+export function ecefToEci(p: EcefPos, missionElapsedSeconds: number): EciPos {
+  const theta = siderealAngle(missionElapsedSeconds)
+  const rotated = ecefToEciLocal(p, LAUNCH_SITE_POLAR_AXIS, theta)
+  return planetCenteredToLaunchSite(rotated as PlanetCenteredPos) as EciPos
+}
+
+/** EciVel (pad-basis inertial velocity) -> the same physical velocity
+ *  expressed in the ECEF basis, at sidereal time `missionElapsedSeconds`.
+ *  Velocities have no origin to translate (see EciVel's doc comment above)
+ *  so this is rotation only — no launchSiteToPlanetCentered step, unlike
+ *  the position conversions. NOTE this is NOT "velocity relative to the
+ *  rotating ground" (that would need to also subtract the local
+ *  omega x r carrying velocity — see physics/inertialDynamics.ts) — it is
+ *  purely a change of basis for the same inertial velocity vector, the
+ *  rotational analogue of eciToEcef() for positions. */
+export function eciVelToEcef(v: EciVel, missionElapsedSeconds: number): Vec3Tuple {
+  const theta = siderealAngle(missionElapsedSeconds)
+  return eciToEcefLocal(v, LAUNCH_SITE_POLAR_AXIS, theta) as Vec3Tuple
+}
+
+/** The inverse of eciVelToEcef(). */
+export function ecefVelToEci(v: Vec3Tuple, missionElapsedSeconds: number): EciVel {
+  const theta = siderealAngle(missionElapsedSeconds)
+  return ecefToEciLocal(v, LAUNCH_SITE_POLAR_AXIS, theta) as EciVel
 }
 
 // ─────────────────────────── vector helpers ───────────────────────────
