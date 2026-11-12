@@ -1,22 +1,22 @@
-/**
- * earthRotation.ts — Earth's angular velocity and the ECI<->ECEF rotation.
+﻿/**
+ * earthRotation.ts â€” Earth's angular velocity and the ECI<->ECEF rotation.
  *
  * Part of the frames branch (feature/eci-ecef-frames): establishing a true
  * Earth-Centered Inertial frame and a true Earth-Centered Earth-Fixed frame,
  * with an explicit, checkable rotation between them, rather than treating
  * "launch-site frame" as inertial-by-assumption (which is what the physics
- * engine did before this branch — correct only because Earth's rotation was
+ * engine did before this branch â€” correct only because Earth's rotation was
  * never modeled at all).
  *
  * WHY THIS IS ITS OWN FILE, separate from frames.ts and rocketPhysics.ts:
  * Earth's rotation is a single, self-contained physical fact (one constant,
  * one angle that grows linearly with time, one rotation matrix built from
- * that angle) that several very different consumers need independently —
+ * that angle) that several very different consumers need independently â€”
  * the physics engine (Coriolis/centrifugal terms, launch velocity), a
  * future ground-track/sidereal-time display, and any future ECEF-based
  * geodetic math (lat/lon from a position). Folding it into frames.ts would
  * mix "what frames exist and how do positions convert between them" with
- * "what IS Earth's rotation, numerically" — two different kinds of fact
+ * "what IS Earth's rotation, numerically" â€” two different kinds of fact
  * that happen to compose, not one. Folding it into rocketPhysics.ts would
  * put the one shared Earth-rotation definition behind that file's
  * deliberately headless/no-framework-dependency boundary for consumers
@@ -24,7 +24,7 @@
  * physics engine just to ask "what's the current sidereal angle."
  *
  * THE ROTATION ITSELF: Earth rotates about its own polar axis at a constant
- * angular rate (ignoring precession/nutation/polar motion — not relevant at
+ * angular rate (ignoring precession/nutation/polar motion â€” not relevant at
  * Kalam's fidelity level). ECI is the non-rotating frame (fixed relative to
  * the stars); ECEF is the frame that rotates WITH the Earth (fixed relative
  * to the ground). A position's ECEF coordinates equal its ECI coordinates
@@ -52,8 +52,8 @@
  * cross(axis, LocalUp) and confirm the East component comes out positive.
  */
 
-import type { Vec3 } from '../vec3'
-import * as V3 from '../vec3'
+import type { Vec3 } from '../physics/vec3'
+import * as V3 from '../physics/vec3'
 
 /** Earth's mean angular velocity, rad/s. One sidereal day (23h 56m 4.1s =
  *  86164.1 s) is the correct period to use here -- NOT the 24h solar day,

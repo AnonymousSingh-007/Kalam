@@ -1,5 +1,5 @@
-/**
- * launchSite.ts — the fixed launch pad's geodetic latitude and the
+﻿/**
+ * launchSite.ts â€” the fixed launch pad's geodetic latitude and the
  * rotational velocity that gives the rocket at T-0.
  *
  * Part of the frames branch (feature/eci-ecef-frames). Before this branch,
@@ -33,7 +33,7 @@
 
 import { EARTH_RADIUS_M } from './scale'
 import { OMEGA_EARTH, polarAxisInLocalFrame } from './earthRotation'
-import type { Vec3 } from '../vec3'
+import type { Vec3 } from '../physics/vec3'
 
 /** The launch pad's geodetic latitude, degrees. Positive = Northern
  *  hemisphere. Sriharikota is at ~13.72 deg N; 13.7 is close enough for

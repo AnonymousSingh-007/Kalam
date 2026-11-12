@@ -1,5 +1,5 @@
-/**
- * rocketPhysics.ts — full 6-DOF rigid-body rocket flight simulator.
+﻿/**
+ * rocketPhysics.ts â€” full 6-DOF rigid-body rocket flight simulator.
  *
  * State (13 scalars): px,py,pz (position) | vx,vy,vz (velocity) |
  * qx,qy,qz,qw (orientation quaternion, body->local) | wx,wy,wz (body-frame
@@ -7,11 +7,11 @@
  *
  *  FRAME        local launch-site tangent frame, inertial, origin at the pad.
  *               +Y = up, +Z = north, +X = east. NOT rotating (no Coriolis,
- *               no Earth-rotation boost — see 6dof-spec.md "Deferred").
+ *               no Earth-rotation boost â€” see 6dof-spec.md "Deferred").
  *               This convention is now also an explicit, importable type
  *               (LaunchSitePos) in constants/frames.ts, alongside the
  *               planet-centred and render frames and the conversions
- *               between all three — this comment describes the same
+ *               between all three â€” this comment describes the same
  *               frame that module defines, not a second parallel one.
  *  BODY AXES    +Y_body = nose-first (thrust/symmetry axis), +X_body =
  *               pitch-plane normal (today's old "n"), +Z_body = yaw-plane
@@ -19,7 +19,7 @@
  *               plane; gimbal/fin yaw acts in the Y_body-Z_body plane.
  *  ATMOSPHERE   ISA 1976, unchanged from the planar model.
  *  WIND         altitude profile + Ornstein-Uhlenbeck gusts, applied along
- *               local +X only (unchanged) — aerodynamics use air-relative
+ *               local +X only (unchanged) â€” aerodynamics use air-relative
  *               velocity in 3D.
  *  GRAVITY      true inverse-square vector toward a planet centre sitting
  *               directly below the pad at local (0, -R_EARTH, 0); resolves
@@ -29,14 +29,14 @@
  *               rocket, pitch plane == yaw plane by symmetry). Iyy (roll,
  *               along the long axis) is a separate, much smaller term from
  *               each mass lump's own radius. Euler's equation carries the
- *               new ω×(I·ω) gyroscopic coupling term, zero in the old
+ *               new Ï‰Ã—(IÂ·Ï‰) gyroscopic coupling term, zero in the old
  *               planar model and non-zero whenever roll and pitch/yaw
  *               coexist.
  *  AERO         same tables (Cd(mach), CN, Barrowman CP) as the planar
  *               model, now evaluated at a true 3D angle of attack and
  *               resolved into independent pitch-plane and yaw-plane
  *               components. No passive aerodynamic roll torque (flagged
- *               Phase-1 simplification — real for a lumped-CN fin model).
+ *               Phase-1 simplification â€” real for a lumped-CN fin model).
  *  PROPULSION   unchanged scalar thrust model; thrust DIRECTION is now the
  *               body +Y axis rotated by (gimbalPitch, gimbalYaw) before
  *               being rotated into the local frame by the body quaternion.
@@ -50,13 +50,13 @@
  *               work).
  *  RECOVERY     drogue/main chute at the nose, forces evaluated at the
  *               attachment point's 3D velocity.
- *  GROUND       launch rail, hold-down, soft landing vs crash — now checks
+ *  GROUND       launch rail, hold-down, soft landing vs crash â€” now checks
  *               tilt/spin magnitude across all three rotational axes.
  *
  * Collapse guarantee: with zero yaw/roll input and zero initial roll, this
  * engine's px,py,vx,vy and the pitch component of orientation/rate must
  * match the old 3-DOF engine's x,y,vx,vy,theta,omega exactly (6dof-spec.md
- * §9, acceptance test 1). See the sign-convention notes below.
+ * Â§9, acceptance test 1). See the sign-convention notes below.
  *
  * Sign conventions (standard right-hand 3D, NOT the old clockwise-positive
  * 2D convention):
@@ -66,7 +66,7 @@
  *     Z_body maps as tau_z = -tau_old.
  *   - bodyAngle telemetry (kept "nose-right positive" for compatibility)
  *     is computed as atan2(bodyDir.x, bodyDir.y) where bodyDir is the body
- *     +Y axis expressed in the local frame — this matches the old
+ *     +Y axis expressed in the local frame â€” this matches the old
  *     atan2-based sign exactly when yaw/roll are zero.
  *   - Positive wy (roll rate) = CCW about +Y_body looking from the tail
  *     toward the nose (down the thrust axis).
@@ -80,13 +80,13 @@ import type { Quat } from './quat'
 import { EARTH_RADIUS_M } from '../constants/scale'
 import { PLANET_CENTER_IN_LAUNCH_SITE_FRAME } from '../constants/frames'
 import { LAUNCH_SITE_ECI_VELOCITY } from '../constants/launchSite'
-import { atmosphereEciVelocity } from './physics/inertialDynamics'
+import { atmosphereEciVelocity } from './inertialDynamics'
 
-// ═══════════════════════════ constants ═══════════════════════════
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â• constants â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 
 const G0 = 9.80665
 // Earth's radius now comes from the single shared constants module
-// (src/constants/scale.ts) instead of a second, independent literal —
+// (src/constants/scale.ts) instead of a second, independent literal â€”
 // this file previously declared its own R_EARTH = 6_371_000, identical
 // in value to buildGround.ts's EARTH_RADIUS_M but with nothing enforcing
 // that the two stayed in sync. The constants module has no three.js or
@@ -116,21 +116,21 @@ const round = (v: number, d = 2) => {
   return r === 0 ? 0 : r
 }
 
-// ═══════════════════════════ spherical gravity (3D) ═══════════════════════════
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â• spherical gravity (3D) â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 // The planet centre sits directly below the pad in the local (launch-site)
 // frame. Gravity points from the vehicle's position toward that centre,
-// magnitude g0 * (R_earth / r)^2 — resolves properly in X, Y, AND Z, so
+// magnitude g0 * (R_earth / r)^2 â€” resolves properly in X, Y, AND Z, so
 // out-of-plane (Z) drift also tilts gravity toward the true centre.
 //
 // PLANET_CENTER used to be its own inline `const PLANET_CENTER: Vec3 =
-// [0, -R_EARTH, 0]` here — the exact same point buildGround.ts's "planet
+// [0, -R_EARTH, 0]` here â€” the exact same point buildGround.ts's "planet
 // sits one radius below the pad" logic and Scene.tsx's render-frame math
 // each had to independently agree was correct, with nothing enforcing
 // that agreement. It's now PLANET_CENTER_IN_LAUNCH_SITE_FRAME, defined
 // once in constants/frames.ts as the fixed translation between the
 // launch-site and planet-centred frames, and read here as a plain Vec3
 // (frames.ts has no three.js/DOM dependency, so this doesn't compromise
-// this module's deliberately headless design — same reasoning as the
+// this module's deliberately headless design â€” same reasoning as the
 // EARTH_RADIUS_M import above).
 const PLANET_CENTER: Vec3 = [...PLANET_CENTER_IN_LAUNCH_SITE_FRAME]
 
@@ -141,7 +141,7 @@ function gravityVector3(p: Vec3): { g: Vec3; mag: number; r: number } {
   return { g: V3.scale(d, -mag / r), mag, r }
 }
 
-// ═══════════════════════════ ISA 1976 ═══════════════════════════
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â• ISA 1976 â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 
 const ISA_H = [0, 11000, 20000, 32000, 47000, 51000, 71000]
 const ISA_T = [288.15, 216.65, 216.65, 228.65, 270.65, 270.65, 214.65]
@@ -189,7 +189,7 @@ export function isa1976(geometricAlt: number): Atmosphere {
   return { T, p, rho: p / (R_AIR * T), a: Math.sqrt(GAMMA * R_AIR * T) }
 }
 
-// ═══════════════════════════ aerodynamics tables ═══════════════════════════
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â• aerodynamics tables â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 
 const CD_TABLE: Array<[number, number]> = [
   [0.0, 0.295], [0.6, 0.295], [0.8, 0.340], [0.9, 0.415], [1.0, 0.505],
@@ -224,7 +224,7 @@ const CA_REAR = 0.95          // axial coefficient flying tail-first (blunt base
 const CD_CROSS = 1.1          // finite-cylinder cross-flow drag coefficient
 const BASE_RELIEF = 0.12      // power-on base-drag reduction (plume fills the base)
 
-// ═══════════════════════════ vehicle geometry ═══════════════════════════
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â• vehicle geometry â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 
 const FINENESS = 12
 const NOSE_LEN_D = 3.0
@@ -296,7 +296,7 @@ interface MassProps {
   Iyy: number      // roll inertia, about the body long axis
 }
 
-// ═══════════════════════════ control / actuator constants ═══════════════════════════
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â• control / actuator constants â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 
 const GIMBAL_MAX = 6 * RAD
 const GIMBAL_RATE = 25 * RAD
@@ -306,7 +306,7 @@ const K_THETA = 1.8                  // attitude-hold outer loop (1/s)
 const K_OMEGA = 6.0                  // rate inner loop (1/s)
 const RCS_ACCEL = 30 * RAD           // RCS angular-acceleration authority, per axis
 const RCS_DEADBAND = 0.04
-// Full throttle sweep (0 -> 1 or 1 -> 0) takes 2 seconds of held Up/Down —
+// Full throttle sweep (0 -> 1 or 1 -> 0) takes 2 seconds of held Up/Down â€”
 // fast enough to be responsive, slow enough that it reads as a lever being
 // moved rather than a toggle switch, consistent with the gimbal actuator's
 // own rate-limited (not instant) response to a held pitch key.
@@ -320,14 +320,14 @@ const FIN_CTRL_TAU = 0.03
 const FIN_CTRL_EFF = 0.75           // control effectiveness relative to fin CN_alpha
 const ISP_COLD = 65
 
-// ═══════════════════════════ propulsion constants ═══════════════════════════
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â• propulsion constants â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 
 const ISP_VAC_RATIO = 311 / 282      // vacuum/sea-level Isp of a bell nozzle
 const IGN_TIME = 0.6
 const IGN_FLOOR = 0.1
 const TAILOFF = 0.25
 
-// ═══════════════════════════ recovery / landing constants ═══════════════════════════
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â• recovery / landing constants â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 
 const CD_CHUTE = 1.5
 const CHUTE_INFLATE = 2.0
@@ -349,14 +349,14 @@ const LAND_TILT_MAX = 30 * RAD
 const LAND_SPIN_MAX = 45 * RAD
 // Exported in degrees/plain units (not radians) so postFlightReport.ts can
 // explain exactly which landed-vs-crashed threshold a flight violated,
-// using the SAME numbers touchdown() actually checks against — rather
+// using the SAME numbers touchdown() actually checks against â€” rather
 // than a second, independently-typed copy of 9/30/45 living in the report
 // module, which is exactly the kind of duplicated-constant drift the
 // ALTITUDE_SCALE centralization (constants/scale.ts) existed to prevent.
 export const LANDING_LIMITS = {
   maxImpactSpeedMs: LAND_V_MAX,
   // Rounded here (not just in display formatting) because 30 * RAD * DEG
-  // round-trips through floating point to 29.999999999999996 — the actual
+  // round-trips through floating point to 29.999999999999996 â€” the actual
   // physics check in touchdown() still compares against the exact
   // LAND_TILT_MAX/LAND_SPIN_MAX radian constants above, unaffected by this;
   // this rounding only cleans up the human-readable copy the report reads.
@@ -364,7 +364,7 @@ export const LANDING_LIMITS = {
   maxSpinDegS: Math.round(LAND_SPIN_MAX * DEG),
 }
 
-// ═══════════════════════════ wind ═══════════════════════════
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â• wind â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 
 const WIND_H = [0, 10, 100, 500, 2000, 6000, 11000, 16000, 25000, 50000, 86000]
 const WIND_M = [0.7, 1.0, 1.35, 1.8, 2.6, 4.6, 7.2, 4.2, 2.2, 1.2, 0.8]
@@ -383,9 +383,9 @@ function mulberry32(seed: number) {
   }
 }
 
-// ═══════════════════════════ types ═══════════════════════════
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â• types â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 
-// 13-scalar flat state, matching 6dof-spec.md §2 exactly:
+// 13-scalar flat state, matching 6dof-spec.md Â§2 exactly:
 //  0: px  1: py  2: pz        position, local frame, metres
 //  3: vx  4: vy  5: vz        velocity, local frame
 //  6: qx  7: qy  8: qz  9: qw  orientation quaternion, body -> local
@@ -468,7 +468,7 @@ export const EMPTY_TELEMETRY: Telemetry = {
   touchdownTilt: 0, touchdownSpin: 0,
 }
 
-// ═══════════════════════════ engine ═══════════════════════════
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â• engine â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 
 export class RocketPhysicsEngine {
   private params!: RocketParams
@@ -509,11 +509,11 @@ export class RocketPhysicsEngine {
   private rollInput = 0
   private assist = true
   // Manual throttle, 0..1. Multiplies the existing ignition-ramp/tailoff
-  // `frac` in subStep() rather than replacing it — so the realistic
+  // `frac` in subStep() rather than replacing it â€” so the realistic
   // ignition ramp-up and burnout tail-off are preserved, and a player who
   // never touches Up/Down gets exactly today's behavior (throttle stays
   // at its default of 1, i.e. full commanded thrust, same as before this
-  // control existed). Free 0..1 range, no floor once ignited — the
+  // control existed). Free 0..1 range, no floor once ignited â€” the
   // player can throttle down to a full cutoff mid-burn and back up again
   // while propellant remains, by design (no realism gate here).
   private throttleInput = 1
@@ -521,7 +521,7 @@ export class RocketPhysicsEngine {
   // throttleInput each subStep (see THROTTLE_RATE below). Kept separate
   // from throttleInput itself for the same reason pitchInput (a raw -1..1
   // key signal) is kept separate from the controller's actual commanded
-  // rate/attitude state — one is "what key is held right now," the other
+  // rate/attitude state â€” one is "what key is held right now," the other
   // is "the resulting physical quantity after integration."
   private throttleRateInput = 0
   private attHoldPitch = 0        // rad, old theta convention (nose-right positive)
@@ -537,7 +537,7 @@ export class RocketPhysicsEngine {
   private maxQ = 0
   private maxMach = 0
   // Peak speed reached during the whole flight (3D, |v|, same metric as
-  // impactSpeed) — telemetry.velocity is the LIVE vertical speed, which
+  // impactSpeed) â€” telemetry.velocity is the LIVE vertical speed, which
   // reads ~0 right at touchdown/apogee, so the post-flight report needs
   // its own tracked peak rather than reporting whatever velocity happened
   // to be on the final tick.
@@ -547,7 +547,7 @@ export class RocketPhysicsEngine {
   private outcome: 'flying' | 'landed' | 'crashed' = 'flying'
   private aborted = false
   private impactSpeed = 0
-  // Degrees — see touchdown()'s comment. Stay at 0 (their natural
+  // Degrees â€” see touchdown()'s comment. Stay at 0 (their natural
   // "never touched down" default) for the whole flight until touchdown()
   // runs exactly once.
   private touchdownTilt = 0
@@ -595,7 +595,7 @@ export class RocketPhysicsEngine {
 
     // T-0 velocity is NOT zero: the pad is fixed to the rotating Earth, so
     // a rocket sitting on it is already moving through true ECI space at
-    // the site's own rotational speed (see constants/launchSite.ts) —
+    // the site's own rotational speed (see constants/launchSite.ts) â€”
     // purely eastward (index 0 = East component of State13[3..5]) at this
     // project's chosen launch latitude (Sriharikota, ~13.7N). Before the
     // feature/eci-ecef-frames branch this was [0,0,0,0,0,0,...] throughout
@@ -649,7 +649,7 @@ export class RocketPhysicsEngine {
     this.diag = { ...ZERO_DIAG }
   }
 
-  // ───────────────────────── public API ─────────────────────────
+  // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ public API â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
   /** Arrow keys: -1 = pitch left, +1 = pitch right (commanded rate in assist mode). */
   setGimbalInput(input: number): void {
@@ -660,12 +660,12 @@ export class RocketPhysicsEngine {
     this.setGimbalInput(input)
   }
 
-  /** New in Phase 1 — physics-only; UI does not need to wire this up yet. */
+  /** New in Phase 1 â€” physics-only; UI does not need to wire this up yet. */
   setYawInput(input: number): void {
     this.yawInput = clamp(input, -1, 1)
   }
 
-  /** New in Phase 1 — physics-only; UI does not need to wire this up yet. */
+  /** New in Phase 1 â€” physics-only; UI does not need to wire this up yet. */
   setRollInput(input: number): void {
     this.rollInput = clamp(input, -1, 1)
   }
@@ -676,7 +676,7 @@ export class RocketPhysicsEngine {
   }
 
   /** Up/Down keys: -1 = decrease throttle, 0 = hold, +1 = increase throttle.
-   *  This is a RATE of change, not a direct throttle value — subStep()
+   *  This is a RATE of change, not a direct throttle value â€” subStep()
    *  integrates it each tick (THROTTLE_RATE per second) and clamps to
    *  [0, 1], the same "held key ramps a continuous quantity" pattern as
    *  pitch's rate-command, rather than snapping straight to 0 or 1 on a
@@ -685,7 +685,7 @@ export class RocketPhysicsEngine {
     this.throttleRateInput = clamp(input, -1, 1)
   }
 
-  /** Current manual throttle setting, 0..1 — read by Telemetry.throttle
+  /** Current manual throttle setting, 0..1 â€” read by Telemetry.throttle
    *  for the HUD. */
   getThrottle(): number {
     return this.throttleInput
@@ -700,15 +700,15 @@ export class RocketPhysicsEngine {
     this.windScale = sign * (2 + 4 * this.rng())
   }
 
-  /** Flight termination — cuts thrust immediately and forces main-chute
+  /** Flight termination â€” cuts thrust immediately and forces main-chute
    *  deployment, bypassing the normal altitude/speed/dynamic-pressure
    *  gates in updateChute(). Intended for a watchdog (flightWatchdog.ts)
    *  that detects runaway telemetry (tumbling, divergent rates) and calls
    *  this instead of letting the integration keep running into garbage
    *  numbers. Mirrors a real rocket's flight termination system: kill the
-   *  engine, let aero/chute bring it down — does NOT force-zero rotation,
+   *  engine, let aero/chute bring it down â€” does NOT force-zero rotation,
    *  since a real FTS doesn't either; the vehicle still has to physically
-   *  stabilize (or not) under drag and chute forces. Idempotent — calling
+   *  stabilize (or not) under drag and chute forces. Idempotent â€” calling
    *  it again after an abort is already in progress is a no-op. */
   abort(): void {
     if (this.aborted) return
@@ -725,7 +725,7 @@ export class RocketPhysicsEngine {
     }
   }
 
-  /** True once abort() has fired for this flight — UI can show a
+  /** True once abort() has fired for this flight â€” UI can show a
    *  termination banner, telemetry/log consumers can flag the session. */
   isAborted(): boolean {
     return this.aborted
@@ -741,7 +741,7 @@ export class RocketPhysicsEngine {
     return this.snapshot()
   }
 
-  // ───────────────────────── mass properties ─────────────────────────
+  // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ mass properties â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
   private massProps(prop = this.prop, gas = this.rcsGas): MassProps {
     const g = this.geom
@@ -751,14 +751,14 @@ export class RocketPhysicsEngine {
 
     // Ixx = Izz: pitch/yaw inertia, exactly the old scalar computation
     // (parallel-axis theorem along the body's long axis), reused unchanged
-    // for both pitch and yaw planes by axisymmetry (6dof-spec.md §4).
+    // for both pitch and yaw planes by axisymmetry (6dof-spec.md Â§4).
     const Is = ms * ((g.L * g.L) / 12 + (g.xStruct - xcg) ** 2)
     const Ip = prop * ((3 * g.tankR * g.tankR + g.tankLen * g.tankLen) / 12 + (g.xProp - xcg) ** 2)
     const Ir = gas * (g.xRcs - xcg) ** 2
     const I = Math.max(Is + Ip + Ir, 0.5)
 
     // Iyy: roll inertia, about the body's long axis. Each lump contributes
-    // ~0.5*m*r^2 (thin cylindrical shell/rod approximation) — no parallel-
+    // ~0.5*m*r^2 (thin cylindrical shell/rod approximation) â€” no parallel-
     // axis term since the long axis passes through every lump's own centre.
     const IyyStruct = 0.5 * ms * (g.D / 2) ** 2
     const IyyProp = 0.5 * prop * g.tankR ** 2
@@ -768,7 +768,7 @@ export class RocketPhysicsEngine {
     return { m, xcg, I, Iyy }
   }
 
-  // ───────────────────────── environment ─────────────────────────
+  // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ environment â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
   private windProfile(h: number): number {
     let k = WIND_M[WIND_M.length - 1]
@@ -791,7 +791,7 @@ export class RocketPhysicsEngine {
     return Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * v)
   }
 
-  // ───────────────────────── force / torque model ─────────────────────────
+  // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ force / torque model â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
   private deriv(s: State13, c: Ctx): { d: State13; dg: Diag } {
     const g = this.geom
@@ -807,7 +807,7 @@ export class RocketPhysicsEngine {
     // velocity but non-zero ECI velocity, equal to the local
     // Earth-rotation-carried speed. v is now true ECI velocity (it
     // includes LAUNCH_SITE_ECI_VELOCITY from T-0 onward), so the air it's
-    // actually moving through — for drag purposes — is the local
+    // actually moving through â€” for drag purposes â€” is the local
     // atmosphere's own ECI velocity (co-rotation) plus the windX gust
     // profile (which is itself defined relative to the co-rotating
     // ground/air, not relative to the stars). Before this branch, vRel
@@ -832,7 +832,7 @@ export class RocketPhysicsEngine {
 
     if (V > 0.05) {
       // total angle of attack: angle between body +Y and the air-relative
-      // velocity, resolved in body frame (6dof-spec.md §5)
+      // velocity, resolved in body frame (6dof-spec.md Â§5)
       const vBodyLen = V3.length(vBody)
       const caTotal = vBodyLen > 1e-9 ? clamp(vBody[1] / vBodyLen, -1, 1) : 1
       alphaTotal = Math.acos(caTotal)
@@ -854,7 +854,7 @@ export class RocketPhysicsEngine {
 
       // split each force magnitude into pitch-plane (X_body) and yaw-plane
       // (Z_body) components, weighted by the body-frame velocity direction
-      // in each plane — this is what makes two of the four fins primarily
+      // in each plane â€” this is what makes two of the four fins primarily
       // resist pitch and two primarily resist yaw, with no extra bookkeeping
       const sinSum = Math.abs(Math.sin(alphaPitch)) + Math.abs(Math.sin(alphaYaw))
       const wPitch = sinSum > 1e-9 ? Math.sin(alphaPitch) / sinSum : 0
@@ -875,7 +875,7 @@ export class RocketPhysicsEngine {
       const dn = g.xNose - xcg
       const df = g.xFin - xcg
       const dc = g.xCross - xcg
-      // torque about Z_body (pitch axis) and X_body (yaw axis) — note the
+      // torque about Z_body (pitch axis) and X_body (yaw axis) â€” note the
       // minus sign matches the old convention's tau = -(x-xcg)*Fn exactly
       tauAeroPitch = -(dn * FnnP + df * FnfP + dc * FncP)
       tauAeroYaw = -(dn * FnnY + df * FnfY + dc * FncY)
@@ -896,7 +896,7 @@ export class RocketPhysicsEngine {
 
     // thrust: body +Y axis deflected by (gimbalPitch about Z_body, gimbalYaw
     // about X_body), then rotated into the local frame by the body
-    // quaternion (6dof-spec.md §6 — pitch gimbal deflects in the X_body-
+    // quaternion (6dof-spec.md Â§6 â€” pitch gimbal deflects in the X_body-
     // Y_body plane, yaw gimbal in the Y_body-Z_body plane)
     const gp = c.gimbalPitch, gy = c.gimbalYaw
     const thrustDirBody: Vec3 = [-Math.sin(gp), Math.cos(gp) * Math.cos(gy), Math.cos(gp) * Math.sin(gy)]
@@ -904,7 +904,7 @@ export class RocketPhysicsEngine {
     const rNozzle: Vec3 = [0, -(g.L - xcg), 0]
     const tauThrustBody = V3.cross(rNozzle, Fthrust)
 
-    // jet damping — resists pitch/yaw rate, zero contribution to roll (the
+    // jet damping â€” resists pitch/yaw rate, zero contribution to roll (the
     // exhaust plume carries no roll moment of its own)
     const jetCoeff = -c.mdot * (g.L - xcg) ** 2
     const tauJetPitch = jetCoeff * (-w[2])
@@ -935,17 +935,17 @@ export class RocketPhysicsEngine {
     const { g: gravAccel } = gravityVector3(p)
     const a = V3.add(V3.scale(FnonGravLocal, 1 / c.m), gravAccel)
 
-    // specific force for G-load telemetry — resolved along body axes
+    // specific force for G-load telemetry â€” resolved along body axes
     const specificForceBody = V3.add(FnonGravBody, Q.qRotateInverse(q, V3.add(Fthrust, Fchute)))
 
     // total body-frame torque. tauAeroPitch/tauDampPitch/tauJetPitch/
     // tauFinPitch above are computed in OLD-CONVENTION units (positive =
     // nose-right, matching the planar model's tau = -(x-xcg)*Fn directly);
     // tauThrustBody/tauChuteBody/c.tauRcs are already true body-frame
-    // (τx, τy, τz) quantities from actual cross products. Per the header's
-    // sign-convention note, τ_z = -τ_old, so the old-convention pitch
-    // torques are negated here when folded into the true τ_z axis. τ_x
-    // (yaw) has no such old-convention ancestor — tauAeroYaw etc. are
+    // (Ï„x, Ï„y, Ï„z) quantities from actual cross products. Per the header's
+    // sign-convention note, Ï„_z = -Ï„_old, so the old-convention pitch
+    // torques are negated here when folded into the true Ï„_z axis. Ï„_x
+    // (yaw) has no such old-convention ancestor â€” tauAeroYaw etc. are
     // defined directly as the X_body-axis torque, so they add unchanged.
     const tauX = tauAeroYaw + tauDampYaw + tauJetYaw + tauFinYaw + tauChuteBody[0] + tauThrustBody[0] + c.tauRcs[0]
     const tauZ = -(tauAeroPitch + tauDampPitch + tauJetPitch + tauFinPitch) + tauChuteBody[2] + tauThrustBody[2] + c.tauRcs[2]
@@ -984,7 +984,7 @@ export class RocketPhysicsEngine {
     }
   }
 
-  // ───────────────────────── one integration step ─────────────────────────
+  // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ one integration step â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
   private subStep(h: number): void {
     const s = this.s
@@ -1072,8 +1072,8 @@ export class RocketPhysicsEngine {
       s[i] += (h / 6) * (k1.d[i] + 2 * k2.d[i] + 2 * k3.d[i] + k4.d[i])
     }
 
-    // renormalize the orientation quaternion — MUST happen after every RK4
-    // step (6dof-spec.md §7); numerical drift otherwise grows |q| off the
+    // renormalize the orientation quaternion â€” MUST happen after every RK4
+    // step (6dof-spec.md Â§7); numerical drift otherwise grows |q| off the
     // unit sphere over a long flight
     const qn = Q.qNormalize([s[6], s[7], s[8], s[9]])
     s[6] = qn[0]; s[7] = qn[1]; s[8] = qn[2]; s[9] = qn[3]
@@ -1095,17 +1095,17 @@ export class RocketPhysicsEngine {
     // chute forces, same as a real flight-termination system. But a
     // watchdog-triggered abort mid-vacuum, high-altitude flight has none
     // of that: no air, so no aero damping torque, and the chute does
-    // nothing until there's dynamic pressure to bite into — so a runaway
+    // nothing until there's dynamic pressure to bite into â€” so a runaway
     // spin the watchdog caught would otherwise continue completely
     // undamped, forever, exactly as visible as it was the instant it
     // tripped. That's a simulation gap, not a faithful FTS: a real
     // vehicle breaking up or losing attitude control doesn't coast at a
-    // constant multi-thousand-deg/s spin indefinitely — structural
+    // constant multi-thousand-deg/s spin indefinitely â€” structural
     // breakup, residual venting asymmetry, whatever the real mechanism,
     // SOMETHING sheds that momentum. Model it as a simple exponential
     // decay on body-frame angular velocity once aborted, independent of
     // dynamic pressure, so the tumble visibly winds down instead of
-    // spinning forever. Short time constant (~0.4s to ~1/e) — fast enough
+    // spinning forever. Short time constant (~0.4s to ~1/e) â€” fast enough
     // to read as "breaking apart/losing it" within a couple seconds, not
     // an instant freeze-frame snap.
     if (this.aborted) {
@@ -1126,7 +1126,7 @@ export class RocketPhysicsEngine {
     return out
   }
 
-  // ───────────────────────── flight computer ─────────────────────────
+  // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ flight computer â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
   private controlStep(
     s: State13, tauPassivePitch: number, tauPassiveYaw: number, qDyn: number, mach: number,
@@ -1175,7 +1175,7 @@ export class RocketPhysicsEngine {
         this.omegaCmdYaw = omCmdYaw
         const tauNeedYaw = mp.I * K_OMEGA * (omCmdYaw - omYaw) - tauPassiveYaw
 
-        // ---- roll axis — RCS only, no TVC/fin authority (6dof-spec.md §6) ----
+        // ---- roll axis â€” RCS only, no TVC/fin authority (6dof-spec.md Â§6) ----
         let omCmdRoll: number
         if (Math.abs(this.rollInput) > 0.01) {
           omCmdRoll = this.rollInput * OMEGA_MAX
@@ -1183,7 +1183,7 @@ export class RocketPhysicsEngine {
         } else {
           omCmdRoll = clamp(K_THETA * wrapPi(this.attHoldRoll - 0), -OMEGA_MAX, OMEGA_MAX)
           // roll has no particular orientation that matters for an unguided
-          // ascent — hold current roll by tracking zero relative to itself
+          // ascent â€” hold current roll by tracking zero relative to itself
           this.attHoldRoll = 0
           omCmdRoll = Math.abs(this.rollInput) > 0.01 ? omCmdRoll : clamp(-K_THETA * 0, -OMEGA_MAX, OMEGA_MAX)
         }
@@ -1229,11 +1229,11 @@ export class RocketPhysicsEngine {
         const residYaw = tauNeedYaw - allocYaw.tauGim - allocYaw.tauFin
 
         // RCS: pitch/yaw residual (maps to body Z/X axes) plus roll, sharing
-        // one finite cold-gas budget (6dof-spec.md §6)
+        // one finite cold-gas budget (6dof-spec.md Â§6)
         //
         // Torque authority must track the vehicle's CURRENT inertia, not
         // its launch-time inertia. this.tauRcsMax/tauRcsMaxRoll are frozen
-        // once in init() from the full, fueled mass (kept as-is — they're
+        // once in init() from the full, fueled mass (kept as-is â€” they're
         // also reported by describe() as a vehicle spec) and were being
         // reused here unchanged for the rest of the flight. As propellant
         // and RCS gas burn off, actual I/Iyy can shrink by two to three
@@ -1241,7 +1241,7 @@ export class RocketPhysicsEngine {
         // 0.5) / Math.max(..., 0.05)), while the torque clamp stayed sized
         // for the original, much heavier vehicle. The same fixed torque
         // applied to a much smaller inertia is a proportionally much
-        // larger angular acceleration (tau/I) — exactly the mechanism
+        // larger angular acceleration (tau/I) â€” exactly the mechanism
         // behind the observed multi-thousand-deg/s runaway spin late in
         // flight. Recompute the authority every substep from the current
         // mp.I/mp.Iyy (already passed in, already up to date) instead.
@@ -1283,7 +1283,7 @@ export class RocketPhysicsEngine {
         finCmdPitch = this.pitchInput * FIN_CTRL_MAX
         finCmdYaw = this.yawInput * FIN_CTRL_MAX
         if (Math.abs(this.rollInput) > 0.01 && this.rcsGas > 0) {
-          // Same current-inertia fix as the assisted branch above — don't
+          // Same current-inertia fix as the assisted branch above â€” don't
           // use the frozen launch-time this.tauRcsMaxRoll here either.
           const tauRcsMaxRollNow = RCS_ACCEL * mp.Iyy
           tauRcsOut[1] = clamp(this.rollInput * tauRcsMaxRollNow, -tauRcsMaxRollNow, tauRcsMaxRollNow)
@@ -1297,7 +1297,7 @@ export class RocketPhysicsEngine {
       this.omegaCmdRoll = 0
     }
 
-    // gimbal actuators: first-order lag, rate limit, travel limit — per axis
+    // gimbal actuators: first-order lag, rate limit, travel limit â€” per axis
     const rateP = clamp((gimCmdPitch - this.gimbalPitch) / GIMBAL_TAU, -GIMBAL_RATE, GIMBAL_RATE)
     this.gimbalPitch = clamp(this.gimbalPitch + rateP * h, -GIMBAL_MAX, GIMBAL_MAX)
     this.gimbalCmd = gimCmdPitch
@@ -1317,7 +1317,7 @@ export class RocketPhysicsEngine {
     setRcsUsed(rcsUsed)
   }
 
-  // ───────────────────────── recovery ─────────────────────────
+  // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ recovery â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
   private updateChute(q: number, s: State13): void {
     if (this.chuteState !== 0) return
@@ -1349,7 +1349,7 @@ export class RocketPhysicsEngine {
     return this.chuteMainArea * smoothstep((this.time - this.tMain) / CHUTE_INFLATE)
   }
 
-  // ───────────────────────── rail / ground ─────────────────────────
+  // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ rail / ground â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
   private applyConstraints(): void {
     const s = this.s
@@ -1385,7 +1385,7 @@ export class RocketPhysicsEngine {
     const bodyDir = Q.qRotate(q, [0, 1, 0])
     const tiltFromVertical = Math.acos(clamp(bodyDir[1], -1, 1))
     const spin = V3.length([s[10], s[11], s[12]])
-    // Previously computed here and discarded once outcome was decided —
+    // Previously computed here and discarded once outcome was decided â€”
     // kept now (in degrees, matching every other angle/rate field in
     // Telemetry) so the post-flight report can explain WHICH threshold a
     // crash actually violated (excess tilt vs. excess spin vs. excess
@@ -1405,7 +1405,7 @@ export class RocketPhysicsEngine {
     this.omegaCmdPitch = 0; this.omegaCmdYaw = 0; this.omegaCmdRoll = 0
   }
 
-  // ───────────────────────── flight stage ─────────────────────────
+  // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ flight stage â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
   private updateStage(): void {
     if (this.outcome !== 'flying') { this.stage = 'descent'; return }
@@ -1418,7 +1418,7 @@ export class RocketPhysicsEngine {
     else this.stage = 'descent'
   }
 
-  // ───────────────────────── telemetry ─────────────────────────
+  // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ telemetry â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
   snapshot(): Telemetry {
     const g = this.geom
@@ -1438,8 +1438,8 @@ export class RocketPhysicsEngine {
     const fpa = speed > 0.5 ? Math.atan2(s[3], s[4]) * DEG : 0
 
     // old-convention pitch angle/rate: nose-right positive, from body +Y
-    // expressed in the local frame — matches the planar model exactly when
-    // yaw/roll are zero (6dof-spec.md §2 sign-convention note)
+    // expressed in the local frame â€” matches the planar model exactly when
+    // yaw/roll are zero (6dof-spec.md Â§2 sign-convention note)
     const bodyDir = Q.qRotate(q, [0, 1, 0])
     const bodyAngle = Math.atan2(bodyDir[0], bodyDir[1])
     const yawAngle = Math.atan2(bodyDir[2], bodyDir[1])
@@ -1529,7 +1529,7 @@ export class RocketPhysicsEngine {
    *  Euler-like *derived* quantities (atan2 projections of the quaternion),
    *  and SLERPing between two decomposed-angle snapshots is not the same
    *  operation as SLERPing the true orientation -- it can take the wrong
-   *  short way around near a ±180° wrap or through a projection
+   *  short way around near a Â±180Â° wrap or through a projection
    *  singularity the atan2 decomposition introduces. The render side must
    *  interpolate the raw quaternion and re-derive any Euler-style angle
    *  from the *interpolated* quaternion, never interpolate the angles
@@ -1543,7 +1543,7 @@ export class RocketPhysicsEngine {
     }
   }
 
-  // ───────────────────────── diagnostics for tests ─────────────────────────
+  // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ diagnostics for tests â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
   /** Vehicle constants derived from the params (used by the validation script). */
   describe() {
