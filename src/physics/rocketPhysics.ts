@@ -87,6 +87,7 @@ import {
 } from '../constants/frames'
 import { LAUNCH_SITE_ECI_VELOCITY } from '../constants/launchSite'
 import { atmosphereEciVelocity } from './inertialDynamics'
+import { stateToOrbitalElements } from './orbitalMechanics'
 
 // â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â• constants â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 
@@ -138,7 +139,14 @@ const round = (v: number, d = 2) => {
 // (frames.ts has no three.js/DOM dependency, so this doesn't compromise
 // this module's deliberately headless design — same reasoning as the
 // EARTH_RADIUS_M import above).
-const PLANET_CENTER: Vec3 = [...PLANET_CENTER_IN_LAUNCH_SITE_FRAME]
+// Explicit three-element construction rather than a spread: spreading the
+// branded readonly tuple widens to number[], which strict tsc rejects as a
+// Vec3 (Vite's esbuild never typechecks, so this only bites real builds).
+const PLANET_CENTER: Vec3 = [
+  PLANET_CENTER_IN_LAUNCH_SITE_FRAME[0],
+  PLANET_CENTER_IN_LAUNCH_SITE_FRAME[1],
+  PLANET_CENTER_IN_LAUNCH_SITE_FRAME[2],
+]
 
 function gravityVector3(p: Vec3): { g: Vec3; mag: number; r: number } {
   const d = V3.sub(p, PLANET_CENTER)
@@ -472,6 +480,12 @@ export const EMPTY_TELEMETRY: Telemetry = {
   airDensity: 1.225, airPressure: 101325, airTemperature: 288.15, speedOfSound: 340.29,
   windSpeed: 0, cdAxial: 0, chuteState: 0, outcome: 'flying', impactSpeed: 0,
   touchdownTilt: 0, touchdownSpin: 0,
+  // Orbital elements of a vehicle at rest on the pad: deeply sub-orbital
+  // (periapsis far inside the planet), inclination = launch latitude.
+  // Real values are computed per-snapshot; these are only the pre-first-
+  // snapshot placeholders and are immediately replaced.
+  apoapsis: 0, periapsis: -EARTH_RADIUS_M, eccentricity: 0,
+  inclinationDeg: 13.7, orbitalPeriod: 0, orbitRegime: 'sub-orbital',
 }
 
 // â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â• engine â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
@@ -1506,6 +1520,13 @@ export class RocketPhysicsEngine {
     const groundPos = eciToEcef([s[0], s[1], s[2]] as EciPos, missionElapsed)
     const groundVel = eciVelToEcef([s[3], s[4], s[5]] as EciVel, [s[0], s[1], s[2]] as EciPos, missionElapsed)
 
+    // Orbital elements from the raw inertial state (see the return block's
+    // comment for why these use s[0..5] directly, not groundPos/groundVel).
+    const orb = stateToOrbitalElements(
+      V3.sub([s[0], s[1], s[2]], PLANET_CENTER),
+      [s[3], s[4], s[5]]
+    )
+
     // Same ground-relative reasoning as groundPos/groundVel above: flight
     // path angle is "how steep is the rocket's climb/descent relative to
     // the ground," which must be measured from ground-relative velocity.
@@ -1597,6 +1618,22 @@ export class RocketPhysicsEngine {
       impactSpeed: round(this.impactSpeed),
       touchdownTilt: round(this.touchdownTilt),
       touchdownSpin: round(this.touchdownSpin),
+
+      // Orbital elements — computed from the TRUE ECI state (raw s[0..5]
+      // re-centred to the planet), deliberately NOT from groundPos/groundVel:
+      // orbits live in the inertial frame, and the carried rotational
+      // velocity that the ground-relative display subtracts out is real
+      // orbital velocity that genuinely counts toward reaching orbit (it's
+      // the ~450 m/s equatorial-launch bonus real rockets exploit).
+      // Math.round(Infinity) === Infinity, so the open-trajectory sentinels
+      // pass through round() unharmed; HUD code checks orbitRegime /
+      // Number.isFinite before formatting (see types.ts).
+      apoapsis: round(orb.apoapsisAltitude),
+      periapsis: round(orb.periapsisAltitude),
+      eccentricity: round(orb.eccentricity, 4),
+      inclinationDeg: round(orb.inclinationDeg, 2),
+      orbitalPeriod: round(orb.period, 1),
+      orbitRegime: orb.regime,
     }
   }
 

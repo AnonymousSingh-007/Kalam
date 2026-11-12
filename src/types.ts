@@ -129,6 +129,19 @@ export interface Telemetry {
   impactSpeed: number      // m/s at touchdown (0 until touchdown)
   touchdownTilt: number    // deg from vertical at touchdown (0 until touchdown)
   touchdownSpin: number    // deg/s, |angular velocity| at touchdown (0 until touchdown)
+
+  // Orbital mechanics (physics/orbitalMechanics.ts) — classical elements of
+  // the conic the rocket is instantaneously on, computed every snapshot from
+  // the true ECI state. Constants of the motion during pure coast; they move
+  // under thrust/drag, which is exactly what makes them worth displaying.
+  // apoapsis and orbitalPeriod are Infinity on open (escape) trajectories —
+  // display code should check orbitRegime or Number.isFinite before printing.
+  apoapsis: number         // m, apoapsis ALTITUDE above the surface (Infinity if escaping)
+  periapsis: number        // m, periapsis ALTITUDE above the surface (negative = orbit intersects Earth)
+  eccentricity: number     // 0 circular, (0,1) elliptical, >=1 open
+  inclinationDeg: number   // deg from the equatorial plane
+  orbitalPeriod: number    // s (Infinity if escaping)
+  orbitRegime: 'sub-orbital' | 'orbital' | 'escape'
 }
 
 // ───────────────────────── commentary ─────────────────────────
