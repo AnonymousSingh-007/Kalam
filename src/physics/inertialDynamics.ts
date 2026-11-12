@@ -1,5 +1,5 @@
-/**
- * inertialDynamics.ts — what the rocket's equations of motion need to know
+﻿/**
+ * inertialDynamics.ts â€” what the rocket's equations of motion need to know
  * about Earth's rotation, given that they integrate in TRUE ECI.
  *
  * Part of the frames branch (feature/eci-ecef-frames). First subfolder
@@ -50,8 +50,8 @@
  * instead, which correctly treats the air as co-rotating with the ground.
  */
 
-import type { Vec3 } from '../vec3'
-import * as V3 from '../vec3'
+import type { Vec3 } from './vec3'
+import * as V3 from './vec3'
 import { OMEGA_EARTH, polarAxisInLocalFrame } from '../constants/earthRotation'
 import { LAUNCH_SITE_LATITUDE_RAD } from '../constants/launchSite'
 
