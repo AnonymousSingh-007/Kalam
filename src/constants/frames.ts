@@ -230,19 +230,42 @@ export function planetCenteredToRender(p: PlanetCenteredPos): RenderPos {
 // planet-centred origin first, since the rotation axis passes through the
 // planet's centre, not the pad).
 
-/** EciPos (pad-origin inertial) -> EcefPos (planet-centre-origin, rotating
- *  with the Earth), at sidereal time `missionElapsedSeconds` since this
- *  flight's own t=0. */
+/** EciPos (pad-origin inertial) -> EcefPos, at sidereal time
+ *  `missionElapsedSeconds` since this flight's own t=0.
+ *
+ *  BUG FIXED HERE (found via a live "altitude: 6371000m" flight-termination
+ *  report -- exactly EARTH_RADIUS_M, which is the signature of a translate
+ *  step that ran once but never got undone): the first version of this
+ *  function translated to the planet-centred origin (via
+ *  launchSiteToPlanetCentered) to do the rotation, then RETURNED that
+ *  planet-centred-origin result directly as EcefPos, instead of translating
+ *  back to the pad-relative origin afterward. rocketPhysics.ts's snapshot()
+ *  calls this expecting a result in the SAME pad-relative origin convention
+ *  as the EciPos it passed in (so that "ground-relative altitude" comes out
+ *  as "height above the pad," not "distance from the centre of the Earth")
+ *  -- i.e. EcefPos here needs to behave as a LaunchSitePos-style frame that
+ *  merely has a DIFFERENT (rotating) BASIS from EciPos, not a different
+ *  origin as well. The planet-centred translation is needed only as an
+ *  intermediate step to rotate about the correct axis (which passes through
+ *  the planet's centre, not the pad) -- it must be undone before returning,
+ *  exactly as ecefToEci() below (the inverse direction) already correctly
+ *  does with its own planetCenteredToLaunchSite() call at the end. */
 export function eciToEcef(p: EciPos, missionElapsedSeconds: number): EcefPos {
   const centred = launchSiteToPlanetCentered(p as LaunchSitePos)
   const theta = siderealAngle(missionElapsedSeconds)
-  return eciToEcefLocal(centred, LAUNCH_SITE_POLAR_AXIS, theta) as EcefPos
+  const rotated = eciToEcefLocal(centred, LAUNCH_SITE_POLAR_AXIS, theta)
+  return planetCenteredToLaunchSite(rotated as PlanetCenteredPos) as unknown as EcefPos
 }
 
-/** The inverse of eciToEcef(): EcefPos -> EciPos at the same sidereal time. */
+/** The inverse of eciToEcef(): EcefPos -> EciPos at the same sidereal time.
+ *  Mirrors eciToEcef()'s now-corrected translate/rotate/translate-back
+ *  structure exactly, just run in the opposite order (un-translate to
+ *  planet-centred first, since that's the origin the ROTATION needs, then
+ *  rotate, then translate to the pad-relative origin at the end). */
 export function ecefToEci(p: EcefPos, missionElapsedSeconds: number): EciPos {
+  const centred = launchSiteToPlanetCentered(p as unknown as LaunchSitePos)
   const theta = siderealAngle(missionElapsedSeconds)
-  const rotated = ecefToEciLocal(p, LAUNCH_SITE_POLAR_AXIS, theta)
+  const rotated = ecefToEciLocal(centred, LAUNCH_SITE_POLAR_AXIS, theta)
   return planetCenteredToLaunchSite(rotated as PlanetCenteredPos) as EciPos
 }
 
