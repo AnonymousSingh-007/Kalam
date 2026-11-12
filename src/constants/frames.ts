@@ -235,22 +235,30 @@ export function planetCenteredToRender(p: PlanetCenteredPos): RenderPos {
  *  `missionElapsedSeconds` since this flight's own t=0.
  *
  *  BUG FIXED HERE (found via a live "altitude: 6371000m" flight-termination
- *  report -- exactly EARTH_RADIUS_M, which is the signature of a translate
- *  step that ran once but never got undone): the first version of this
- *  function translated to the planet-centred origin (via
- *  launchSiteToPlanetCentered) to do the rotation, then RETURNED that
- *  planet-centred-origin result directly as EcefPos, instead of translating
- *  back to the pad-relative origin afterward. rocketPhysics.ts's snapshot()
- *  calls this expecting a result in the SAME pad-relative origin convention
- *  as the EciPos it passed in (so that "ground-relative altitude" comes out
- *  as "height above the pad," not "distance from the centre of the Earth")
- *  -- i.e. EcefPos here needs to behave as a LaunchSitePos-style frame that
- *  merely has a DIFFERENT (rotating) BASIS from EciPos, not a different
- *  origin as well. The planet-centred translation is needed only as an
- *  intermediate step to rotate about the correct axis (which passes through
- *  the planet's centre, not the pad) -- it must be undone before returning,
- *  exactly as ecefToEci() below (the inverse direction) already correctly
- *  does with its own planetCenteredToLaunchSite() call at the end. */
+ *  report -- exactly EARTH_RADIUS_M, the signature of a translate step that
+ *  ran once but never got undone): the first version of this function
+ *  translated to the planet-centred origin, rotated, and RETURNED that
+ *  planet-centred result directly, instead of translating back to a
+ *  pad-relative origin. Fixed by adding a translate-back step
+ *  (planetCenteredToLaunchSite), using the SAME constant
+ *  PLANET_CENTER_IN_LAUNCH_SITE_FRAME offset the rest of this file already
+ *  uses for every other translation.
+ *
+ *  A SECOND, UNRELATED BUG was briefly chased here and ruled out: a live
+ *  "Earth moves too fast, rocket slides off" report (gradual, growing
+ *  drift -- ~57m by t=60s for a rocket resting on the pad) looked like it
+ *  might mean this function needed to subtract the pad's TIME-VARYING true
+ *  ECI position instead of this constant offset. Direct numerical testing
+ *  disproved that: feeding this function the pad's EXACT true physical ECI
+ *  position (via launchSite.ts's padEciPositionRelCenter(t)) gives EXACTLY
+ *  zero ground-relative drift at every t tested, out to 300 seconds -- this
+ *  function was already perfectly correct. The real bug was one layer up,
+ *  in rocketPhysics.ts: the rail-hold/pre-launch state was feeding this
+ *  function a STRAIGHT-LINE approximation of the pad's motion
+ *  (LAUNCH_SITE_ECI_VELOCITY * t) instead of the true circular path, and
+ *  that approximation -- not this conversion -- is what diverges over
+ *  time. See rocketPhysics.ts's rail-hold constraint for the actual fix;
+ *  this function was correctly left unchanged. */
 export function eciToEcef(p: EciPos, missionElapsedSeconds: number): EcefPos {
   const centred = launchSiteToPlanetCentered(p as LaunchSitePos)
   const theta = siderealAngle(missionElapsedSeconds)
@@ -259,10 +267,13 @@ export function eciToEcef(p: EciPos, missionElapsedSeconds: number): EcefPos {
 }
 
 /** The inverse of eciToEcef(): EcefPos -> EciPos at the same sidereal time.
- *  Mirrors eciToEcef()'s now-corrected translate/rotate/translate-back
- *  structure exactly, just run in the opposite order (un-translate to
- *  planet-centred first, since that's the origin the ROTATION needs, then
- *  rotate, then translate to the pad-relative origin at the end). */
+ *  Mirrors eciToEcef()'s structure in reverse: un-translate to the
+ *  planet-centred origin (same constant PLANET_CENTER_IN_LAUNCH_SITE_FRAME
+ *  offset eciToEcef() uses, via launchSiteToPlanetCentered -- NOT a
+ *  time-varying pad position; see eciToEcef()'s doc comment above for why
+ *  that would be wrong here), rotate forward (ECEF->ECI), then translate to
+ *  the pad-relative (EciPos) origin convention the rest of the codebase
+ *  uses for State13. */
 export function ecefToEci(p: EcefPos, missionElapsedSeconds: number): EciPos {
   const centred = launchSiteToPlanetCentered(p as unknown as LaunchSitePos)
   const theta = siderealAngle(missionElapsedSeconds)

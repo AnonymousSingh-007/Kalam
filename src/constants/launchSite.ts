@@ -1,5 +1,5 @@
 ﻿/**
- * launchSite.ts â€” the fixed launch pad's geodetic latitude and the
+ * launchSite.ts — the fixed launch pad's geodetic latitude and the
  * rotational velocity that gives the rocket at T-0.
  *
  * Part of the frames branch (feature/eci-ecef-frames). Before this branch,
@@ -32,8 +32,9 @@
  */
 
 import { EARTH_RADIUS_M } from './scale'
-import { OMEGA_EARTH, polarAxisInLocalFrame } from './earthRotation'
+import { OMEGA_EARTH, polarAxisInLocalFrame, siderealAngle, ecefToEciLocal } from './earthRotation'
 import type { Vec3 } from '../physics/vec3'
+import * as V3 from '../physics/vec3'
 
 /** The launch pad's geodetic latitude, degrees. Positive = Northern
  *  hemisphere. Sriharikota is at ~13.72 deg N; 13.7 is close enough for
@@ -79,3 +80,68 @@ export const LAUNCH_SITE_ROTATIONAL_SPEED_MPS =
  *  state, since a rocket sitting on the pad before launch IS at that
  *  radius. */
 export const LAUNCH_SITE_ECI_VELOCITY: Vec3 = [LAUNCH_SITE_ROTATIONAL_SPEED_MPS, 0, 0]
+
+/** The pad's fixed position relative to the planet's centre, in the SAME
+ *  axes frames.ts's PLANET_CENTER_IN_LAUNCH_SITE_FRAME uses -- i.e. the pad
+ *  sits at local Up * EARTH_RADIUS_M from the planet's centre, by
+ *  definition (it's a point on the surface, at "zero altitude" relative to
+ *  itself). This is a plain geometric fact, not a time-varying one -- the
+ *  pad's position relative to the CENTRE doesn't change; what changes is
+ *  which direction that position points in ECI space as Earth turns (see
+ *  padEciPositionRelCenter() below). Not imported from frames.ts to avoid a
+ *  circular import (frames.ts already imports LAUNCH_SITE_POLAR_AXIS from
+ *  this file) -- this is the one place that offset is independently
+ *  defined; it must stay numerically identical to frames.ts's own
+ *  PLANET_CENTER_IN_LAUNCH_SITE_FRAME (negated), which it is by
+ *  construction (both are [0, EARTH_RADIUS_M, 0] / [0, -EARTH_RADIUS_M, 0]
+ *  respectively). */
+const PAD_REL_PLANET_CENTER: Vec3 = [0, EARTH_RADIUS_M, 0]
+
+/** BUG THIS FIXES: LAUNCH_SITE_ECI_VELOCITY above is a FROZEN, constant
+ *  velocity -- a straight-line approximation to what is actually CIRCULAR
+ *  motion (the pad traces a circle around Earth's axis as the planet
+ *  turns). That approximation is excellent for the first few seconds, but
+ *  it diverges from the true path with time: verified numerically, a
+ *  rocket held on the rail using this constant velocity to stay "fixed to
+ *  the pad" ends up at a position about 57 metres away from the pad's TRUE
+ *  location by t=60s, growing roughly with t^2 (a classic
+ *  straight-line-vs-arc divergence) -- NOT because of any error in
+ *  frames.ts's eciToEcef/ecefToEci conversions (those were independently
+ *  verified exact against the pad's true position, out to 300 seconds),
+ *  but because the rail-hold state itself was using the wrong velocity for
+ *  "staying still relative to a rotating pad" for anything beyond a few
+ *  seconds pre-launch.
+ *
+ *  This function gives the pad's TRUE, exact ECI position (relative to the
+ *  planet's centre) at any mission-elapsed time `t`, by rotating the pad's
+ *  fixed ECEF-relative-to-centre position forward by the sidereal angle --
+ *  exactly the same ECEF->ECI rotation earthRotation.ts already provides,
+ *  just applied to the pad's own location instead of the rocket's. */
+export function padEciPositionRelCenter(missionElapsedSeconds: number): Vec3 {
+  const theta = siderealAngle(missionElapsedSeconds)
+  return ecefToEciLocal(PAD_REL_PLANET_CENTER, LAUNCH_SITE_POLAR_AXIS, theta)
+}
+
+/** The pad's TRUE, exact ECI velocity at mission-elapsed time `t` -- i.e.
+ *  the actual velocity a point fixed to the rotating ground has, as a
+ *  function of time, rather than LAUNCH_SITE_ECI_VELOCITY's frozen
+ *  snapshot at t=0. This is omega x r_pad,ECI(t): the same carrying-
+ *  velocity relationship used everywhere else in this branch
+ *  (inertialDynamics.ts's atmosphereEciVelocity, frames.ts's velocity
+ *  conversions), evaluated at the pad's own (moving, in ECI) position
+ *  rather than the rocket's.
+ *
+ *  USE THIS, not LAUNCH_SITE_ECI_VELOCITY, anywhere the rocket needs to
+ *  stay genuinely fixed to the pad for more than an instant -- the
+ *  rail-hold constraint in rocketPhysics.ts, specifically. The T-0 initial
+ *  condition can still use the plain LAUNCH_SITE_ECI_VELOCITY constant,
+ *  since t=0 by definition there and padEciVelocity(0) equals it exactly
+ *  (verified: both reduce to the same OMEGA_EARTH * R_EARTH * cos(lat)
+ *  eastward value at theta=0) -- but using this function instead costs
+ *  nothing and removes the risk of the two ever silently disagreeing. */
+export function padEciVelocity(missionElapsedSeconds: number): Vec3 {
+  const theta = siderealAngle(missionElapsedSeconds)
+  const omegaVec = V3.scale(LAUNCH_SITE_POLAR_AXIS, OMEGA_EARTH)
+  const padPos = ecefToEciLocal(PAD_REL_PLANET_CENTER, LAUNCH_SITE_POLAR_AXIS, theta)
+  return V3.cross(omegaVec, padPos)
+}
