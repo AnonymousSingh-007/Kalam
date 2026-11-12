@@ -1134,9 +1134,12 @@ export class RocketPhysicsEngine {
     // -- both computed from vRel in deriv(), not raw ECI velocity). Fixed
     // by converting through the same eciVelToEcef ground-relative
     // transform snapshot()'s groundVel uses, at this substep's own
-    // mission-elapsed time.
+    // mission-elapsed time. eciVelToEcef needs the matching ECI position
+    // too (not velocity alone) -- see frames.ts's doc comment: the correct
+    // ECI->ECEF velocity transform is R(-theta)*(v - omega x r), and that
+    // omega x r term is itself a function of position.
     const missionElapsedNow = this.stage === 'pre-launch' ? 0 : this.time - this.tLaunch
-    const groundVelNow = eciVelToEcef([s[3], s[4], s[5]] as EciVel, missionElapsedNow)
+    const groundVelNow = eciVelToEcef([s[3], s[4], s[5]] as EciVel, [s[0], s[1], s[2]] as EciPos, missionElapsedNow)
     this.maxVelocity = Math.max(this.maxVelocity, V3.length(groundVelNow))
   }
 
@@ -1417,7 +1420,9 @@ export class RocketPhysicsEngine {
     // regardless of the rocket's actual descent rate relative to the
     // ground it's landing on.
     const missionElapsedNow = this.stage === 'pre-launch' ? 0 : this.time - this.tLaunch
-    this.impactSpeed = V3.length(eciVelToEcef([s[3], s[4], s[5]] as EciVel, missionElapsedNow))
+    this.impactSpeed = V3.length(
+      eciVelToEcef([s[3], s[4], s[5]] as EciVel, [s[0], s[1], s[2]] as EciPos, missionElapsedNow)
+    )
     const q: Quat = [s[6], s[7], s[8], s[9]]
     const bodyDir = Q.qRotate(q, [0, 1, 0])
     const tiltFromVertical = Math.acos(clamp(bodyDir[1], -1, 1))
@@ -1499,7 +1504,7 @@ export class RocketPhysicsEngine {
     // yet) regardless of how long the countdown itself sat at t=0.
     const missionElapsed = this.stage === 'pre-launch' ? 0 : this.time - this.tLaunch
     const groundPos = eciToEcef([s[0], s[1], s[2]] as EciPos, missionElapsed)
-    const groundVel = eciVelToEcef([s[3], s[4], s[5]] as EciVel, missionElapsed)
+    const groundVel = eciVelToEcef([s[3], s[4], s[5]] as EciVel, [s[0], s[1], s[2]] as EciPos, missionElapsed)
 
     // Same ground-relative reasoning as groundPos/groundVel above: flight
     // path angle is "how steep is the rocket's climb/descent relative to

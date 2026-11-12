@@ -72,8 +72,9 @@
  */
 
 import { ALTITUDE_SCALE, EARTH_RADIUS_M, metresToScene } from './scale'
-import { siderealAngle, eciToEcefLocal, ecefToEciLocal } from './earthRotation'
+import { siderealAngle, eciToEcefLocal, ecefToEciLocal, OMEGA_EARTH } from './earthRotation'
 import { LAUNCH_SITE_POLAR_AXIS } from './launchSite'
+import * as V3 from '../physics/vec3'
 
 // ─────────────────────────── basis vectors ───────────────────────────
 
@@ -269,24 +270,63 @@ export function ecefToEci(p: EcefPos, missionElapsedSeconds: number): EciPos {
   return planetCenteredToLaunchSite(rotated as PlanetCenteredPos) as EciPos
 }
 
-/** EciVel (pad-basis inertial velocity) -> the same physical velocity
- *  expressed in the ECEF basis, at sidereal time `missionElapsedSeconds`.
- *  Velocities have no origin to translate (see EciVel's doc comment above)
- *  so this is rotation only — no launchSiteToPlanetCentered step, unlike
- *  the position conversions. NOTE this is NOT "velocity relative to the
- *  rotating ground" (that would need to also subtract the local
- *  omega x r carrying velocity — see physics/inertialDynamics.ts) — it is
- *  purely a change of basis for the same inertial velocity vector, the
- *  rotational analogue of eciToEcef() for positions. */
-export function eciVelToEcef(v: EciVel, missionElapsedSeconds: number): Vec3Tuple {
+/** BUG FIXED HERE (caught in external review, confirmed by direct numerical
+ *  test): this function used to be a PURE ROTATION of the velocity vector,
+ *  with no correction for the fact that the ECEF axes themselves are
+ *  rotating. That's wrong, and it's not a cosmetic wrongness — a point
+ *  genuinely fixed to the ground has a REAL, non-zero ECI velocity
+ *  (omega x r, same relationship launchSite.ts and inertialDynamics.ts
+ *  already use), and a pure rotation of that non-zero vector does NOT come
+ *  out to zero in ECEF. Verified numerically: at t=100s after epoch, the
+ *  old pure-rotation version reported a ground-fixed point as moving at
+ *  ~451 m/s in ECEF -- its own full ECI speed, essentially unchanged by
+ *  the rotation -- when the physically correct answer is exactly zero (a
+ *  point fixed to the ground is not moving relative to the ground). This
+ *  silently corrupted every display quantity that went through it:
+ *  lateralVelocity, velocity (vertical), velocityZ, maxVelocity, and
+ *  impactSpeed (which gates the landed-vs-crashed check against
+ *  LAND_V_MAX) all read this function's wrong output for any flight where
+ *  real time had passed since theta=0 -- i.e. every flight, since theta=0
+ *  only holds at the very first instant.
+ *
+ *  The correct relationship (standard rotating-frame kinematics -- see
+ *  e.g. the derivative of r_ECEF = R(-theta) r_ECI, which picks up a
+ *  d(theta)/dt term precisely because R itself depends on time):
+ *
+ *    v_ECEF = R(-theta) * (v_ECI - omega x r_ECI)
+ *    v_ECI  = R(theta)  * v_ECEF + omega x r_ECI
+ *
+ *  Both directions now require the matching ECI-frame POSITION as well as
+ *  velocity (signature change from the old position-independent version)
+ *  -- physically necessary, since the omega x r correction term is itself
+ *  a function of where the object is, not just how fast it's moving.
+ *  `r_ECI` here is the full planet-centred ECI position (not the pad-
+ *  relative EciPos) -- same convention inertialDynamics.ts's
+ *  atmosphereEciVelocity() already uses for its own omega x r term, so
+ *  this is now consistent with that file rather than introducing a THIRD
+ *  slightly-different omega x r calculation into the codebase. */
+export function eciVelToEcef(v: EciVel, pEci: EciPos, missionElapsedSeconds: number): Vec3Tuple {
   const theta = siderealAngle(missionElapsedSeconds)
-  return eciToEcefLocal(v, LAUNCH_SITE_POLAR_AXIS, theta) as Vec3Tuple
+  const rEciCentred = launchSiteToPlanetCentered(pEci as LaunchSitePos)
+  const omegaVec = V3.scale(LAUNCH_SITE_POLAR_AXIS, OMEGA_EARTH)
+  const carryingVel = V3.cross(omegaVec, rEciCentred)
+  const vMinusCarrying = V3.sub(v, carryingVel)
+  return eciToEcefLocal(vMinusCarrying, LAUNCH_SITE_POLAR_AXIS, theta) as Vec3Tuple
 }
 
-/** The inverse of eciVelToEcef(). */
-export function ecefVelToEci(v: Vec3Tuple, missionElapsedSeconds: number): EciVel {
+/** The inverse of eciVelToEcef() -- see that function's doc comment for the
+ *  full derivation and the bug this replaces. `pEci` here is the SAME
+ *  ECI-frame position the caller is converting velocity at (consistent
+ *  with v_ECI = R(theta)*v_ECEF + omega x r_ECI using r_ECI, not r_ECEF --
+ *  if you only have the ECEF position, convert it to ECI with ecefToEci()
+ *  first and pass that). */
+export function ecefVelToEci(v: Vec3Tuple, pEci: EciPos, missionElapsedSeconds: number): EciVel {
   const theta = siderealAngle(missionElapsedSeconds)
-  return ecefToEciLocal(v, LAUNCH_SITE_POLAR_AXIS, theta) as EciVel
+  const rEciCentred = launchSiteToPlanetCentered(pEci as LaunchSitePos)
+  const omegaVec = V3.scale(LAUNCH_SITE_POLAR_AXIS, OMEGA_EARTH)
+  const carryingVel = V3.cross(omegaVec, rEciCentred)
+  const rotated = ecefToEciLocal(v, LAUNCH_SITE_POLAR_AXIS, theta)
+  return V3.add(rotated, carryingVel) as EciVel
 }
 
 // ─────────────────────────── vector helpers ───────────────────────────
