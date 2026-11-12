@@ -1246,7 +1246,28 @@ export class RocketPhysicsEngine {
           let gim = 0, tauGim = 0
           let fin = 0, tauFin = 0
           if (tvcAuth > 0) {
-            gim = Math.asin(clamp(tauG / (T * arm), -sinMax, sinMax))
+            // SIGN FIX: this block originally solved gim from
+            // tauGim = +T*sin(gim)*arm, i.e. assuming a positive gimbal
+            // deflection produces a positive torque about the controlled
+            // axis. The actual physics (thrustDirBody/Fthrust/rNozzle
+            // above, cross-producted into tauThrustBody, then folded into
+            // tauX/tauZ) gives exactly the OPPOSITE sign on both the pitch
+            // and yaw channels: tauThrustBody[0] = -T*arm*sin(gy) for yaw,
+            // tauThrustBody[2] = -T*arm*sin(gp) for pitch (verified
+            // numerically, ratio -1 on both axes). The fin channel is
+            // correctly signed (tauFinPitch/tauFinYaw's own double
+            // negation already matches tauF's convention) -- only TVC was
+            // inverted. With the original sign, attitude-hold was a
+            // POSITIVE feedback loop on the gimbal channel: any small
+            // perturbation grew instead of being corrected, saturating
+            // the gimbal/fins at their travel limits and tumbling the
+            // vehicle (reproduced directly: a 0.01 deg yaw error at t=4s
+            // grew to a full tumble with rcsTorqueYaw pegged at ~400,000
+            // N*m by t=5.5s). Negating gim here (and tauGim, so the
+            // residual handed to RCS below stays self-consistent with
+            // what the actuator will actually produce) fixes both axes
+            // at once, since allocate() is shared between them.
+            gim = -Math.asin(clamp(tauG / (T * arm), -sinMax, sinMax))
             tauGim = T * Math.sin(gim) * arm
           }
           if (finGain > 1e-9) {
