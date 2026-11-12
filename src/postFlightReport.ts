@@ -198,7 +198,7 @@ export function generateReport(
         `Impact speed was ${fmt(telemetry.impactSpeed, 1)} m/s against a ${LANDING_LIMITS.maxImpactSpeedMs} m/s limit — the vehicle came down too fast for the recovery system to absorb.`
       )
       suggestions.push(
-        'Check that the drogue and main parachute actually deployed before touchdown (chuteState in telemetry) — a chute that never opens, or opens too late, is the most common cause of an over-speed landing. If it did deploy, a lighter dry mass gives the same canopy a lower terminal descent rate.'
+        'Check that the parachute actually deployed before touchdown (chuteState in telemetry) — a chute that never opens, or opens too late, is the most common cause of an over-speed landing. If it did deploy, a lighter dry mass gives the same canopy a lower terminal descent rate.'
       )
     }
     if (brokeTilt) {

@@ -124,7 +124,7 @@ export interface Telemetry {
   cdAxial: number          // current axial drag coefficient
 
   // Recovery / outcome
-  chuteState: 0 | 1 | 2    // 0 stowed, 1 drogue, 2 main
+  chuteState: 0 | 1        // 0 stowed, 1 main deployed (main-only recovery, no drogue stage)
   outcome: 'flying' | 'landed' | 'crashed'
   impactSpeed: number      // m/s at touchdown (0 until touchdown)
   touchdownTilt: number    // deg from vertical at touchdown (0 until touchdown)
