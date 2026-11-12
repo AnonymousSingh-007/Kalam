@@ -39,7 +39,17 @@ import type { Telemetry } from './types'
 const MAX_SANE_RATE_DEG_S = 2000       // any axis — pitch/yaw/roll rate
 const MAX_SANE_ANGVEL_SUM_DEG_S = 3000 // combined magnitude across axes, catches coupled tumbles
 const MAX_SANE_MACH = 500              // well past any realistic vehicle, short of the 10^4+ seen in blowups
-const MAX_SANE_ALTITUDE_M = 5_000_000  // 5,000 km — generous, but catches the 10^8+ runaway case
+// Raised 5,000 km -> 100,000 km for the orbital-mechanics work: a legitimate
+// elliptical orbit or escape trajectory can pass 5,000 km of altitude on
+// entirely healthy physics (a 1.1x-circular burn at 300 km already coasts to
+// a ~3,850 km apoapsis; GEO is 35,786 km). 100,000 km sits comfortably past
+// GEO while staying orders of magnitude below the 10^8+ m signatures of the
+// numeric blowups this guard exists to catch — a runaway doesn't creep past
+// a threshold, it rockets past every threshold at once, so the non-finite
+// and rate guards still catch it long before altitude matters. Orbital Mach
+// (~28 at 7.7 km/s in the thin upper atmosphere) stays far under the Mach
+// guard, which is left unchanged.
+const MAX_SANE_ALTITUDE_M = 100_000_000  // 100,000 km
 
 export type AbortReason =
   | 'non_finite_telemetry'
