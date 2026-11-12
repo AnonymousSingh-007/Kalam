@@ -81,11 +81,12 @@ import { EARTH_RADIUS_M } from '../constants/scale'
 import {
   PLANET_CENTER_IN_LAUNCH_SITE_FRAME,
   eciToEcef,
+  ecefToEci,
   eciVelToEcef,
   type EciPos,
   type EciVel,
 } from '../constants/frames'
-import { LAUNCH_SITE_ECI_VELOCITY } from '../constants/launchSite'
+import { LAUNCH_SITE_ECI_VELOCITY, padEciVelocity } from '../constants/launchSite'
 import { atmosphereEciVelocity } from './inertialDynamics'
 import { stateToOrbitalElements } from './orbitalMechanics'
 
@@ -1399,17 +1400,33 @@ export class RocketPhysicsEngine {
         this.railCleared = true
       } else {
         // constrain to vertical motion only, zero all rotation, while on the
-        // rail. s[3] (East velocity) resets to LAUNCH_SITE_ECI_VELOCITY[0],
-        // NOT 0 -- the rocket is still physically sitting on/sliding up a
-        // rail bolted to the rotating Earth, so it's still carried along at
-        // the pad's real ~451 m/s ECI speed; flattening it to a literal 0
-        // would momentarily yank the rocket out of the inertial frame it's
-        // supposed to be fixed in relative to the (moving) ground, every
-        // single substep it's on the rail. s[5] (North velocity) has no
-        // such carried component at this latitude/orientation (the pad's
-        // rotational velocity is pure East -- see launchSite.ts) so it
-        // correctly stays a flat 0.
-        s[0] = 0; s[2] = 0; s[3] = LAUNCH_SITE_ECI_VELOCITY[0]; s[5] = 0
+        // rail. The rocket is still physically sitting on/sliding up a rail
+        // bolted to the rotating Earth, so its ECI position AND velocity
+        // must stay pinned to the pad's TRUE, time-varying ECI state (via
+        // ecefToEci/padEciVelocity -- the pad's fixed ECEF position rotated
+        // forward to the current sidereal angle), not the frozen t=0
+        // snapshot ([0,0,0] / LAUNCH_SITE_ECI_VELOCITY).
+        //
+        // BUG THIS FIXES: the previous version pinned position to a frozen
+        // s[0]=0 while mission-elapsed time kept advancing. eciToEcef (used
+        // by snapshot()/poseSnapshot() to get ground-relative position) then
+        // rotated that stale ECI coordinate by the GROWING sidereal angle --
+        // so a rocket with a genuinely correct, verified-zero ground-relative
+        // VELOCITY (eciVelToEcef of the old constants came back exactly 0)
+        // still displayed as sliding backwards across the pad at the full
+        // ~451 m/s rail speed, visible within the very first rendered frame
+        // after clicking Launch (reproduced directly: lateralOffset reached
+        // -15m by t=0.03s while altitude was still exactly 0). Using the
+        // pad's true time-varying ECI position/velocity instead makes
+        // eciToEcef of the pinned position come back to exactly [0,0,0]
+        // ground-relative at every t (verified to ~1e-10 m out to 120s) --
+        // the rocket now reads as genuinely motionless on the pad while
+        // actually held there, matching what a real rail-clamped rocket
+        // looks like from the ground.
+        const missionElapsedNow = this.time - this.tLaunch
+        const padPos = ecefToEci([0, 0, 0] as unknown as EciPos, missionElapsedNow)
+        const padVel = padEciVelocity(missionElapsedNow)
+        s[0] = padPos[0]; s[2] = padPos[2]; s[3] = padVel[0]; s[5] = padVel[2]
         s[6] = 0; s[7] = 0; s[8] = 0; s[9] = 1
         s[10] = 0; s[11] = 0; s[12] = 0
       }
@@ -1453,15 +1470,19 @@ export class RocketPhysicsEngine {
       this.impactSpeed <= LAND_V_MAX && tiltFromVertical <= LAND_TILT_MAX && spin <= LAND_SPIN_MAX
         ? 'landed'
         : 'crashed'
-    // Same reasoning as the rail constraint above: a rocket sitting on the
-    // ground after touchdown is still carried along at the pad's real ECI
-    // velocity (it hasn't stopped moving through inertial space -- it's
-    // stopped moving relative to the GROUND, which is a different thing).
-    // s[3] restores LAUNCH_SITE_ECI_VELOCITY[0] rather than flattening to
-    // 0, so the landed rocket's state stays internally consistent with
-    // T-0's initial condition instead of silently drifting out of the
-    // frame's own convention the moment it lands.
-    s[1] = 0; s[3] = LAUNCH_SITE_ECI_VELOCITY[0]; s[4] = 0; s[5] = 0
+    // Same reasoning as the rail constraint above, and the same fix: a
+    // rocket at rest on the ground after touchdown must be pinned to the
+    // LANDING SITE's true time-varying ECI position/velocity, not a frozen
+    // t=0 snapshot, or its displayed ground-relative position would drift
+    // away from the touchdown point exactly like the pre-liftoff rail bug.
+    // (The landing site is wherever s[0]/s[2] already are at this instant --
+    // this only re-pins the VELOCITY component to the correct carried value
+    // for that position/time; position itself is left as the integrator's
+    // own last computed value, which is already correct since nothing was
+    // resetting position here before.)
+    const missionElapsedLanding = this.time - this.tLaunch
+    const landingVel = padEciVelocity(missionElapsedLanding)
+    s[1] = 0; s[3] = landingVel[0]; s[4] = 0; s[5] = landingVel[2]
     s[10] = 0; s[11] = 0; s[12] = 0
     this.gimbalPitch = 0; this.gimbalYaw = 0; this.gimbalCmd = 0; this.gimbalYawCmd = 0
     this.finPitch = 0; this.finYaw = 0; this.tauRcs = [0, 0, 0]
