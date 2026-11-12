@@ -329,21 +329,18 @@ const TAILOFF = 0.25
 
 const CD_CHUTE = 1.5
 const CHUTE_INFLATE = 2.0
-const DROGUE_FRACTION = 0.025
-const CHUTE_Q_MAX = 800
 const MAIN_ALT = 350
 const MAIN_Q_MAX = 1500
-// Hard safety-net altitude for forced full-chute deployment, independent
-// of the normal drogue-then-main staging above. 100 m. The staged
-// sequence (drogue at CHUTE_Q_MAX, main at MAIN_ALT/MAIN_Q_MAX) is gated
-// on dynamic pressure and only ever checked once, from chuteState
-// 0 -> 1 -> 2 -- if the vehicle is still above CHUTE_Q_MAX when it would
-// otherwise qualify for the drogue (e.g. a high-TWR flight that's still
-// supersonic at burnout), chuteState never advances past 0 and NOTHING
-// ever opens, all the way to the ground. This forced trigger exists so
-// that can never happen: crossing 100 m on the way down always deploys
-// full chute area immediately, with no Q gate, as a last-resort override
-// of the staged logic above.
+// Hard safety-net altitude for forced deployment, independent of the
+// normal MAIN_ALT/MAIN_Q_MAX trigger above. 100 m. The normal trigger is
+// gated on dynamic pressure and only checked once (chuteState 0 -> 1) --
+// if the vehicle is still above MAIN_Q_MAX when it would otherwise
+// qualify (e.g. a high-TWR flight that's still supersonic at burnout),
+// chuteState never advances past 0 and NOTHING ever opens, all the way
+// to the ground. This forced trigger exists so that can never happen:
+// crossing 100 m on the way down always deploys full chute area
+// immediately, with no Q gate, as a last-resort override of the normal
+// trigger above.
 const FORCED_DEPLOY_ALT = 100
 const LAND_V_MAX = 9
 const LAND_TILT_MAX = 30 * RAD
@@ -553,15 +550,11 @@ export class RocketPhysicsEngine {
   // runs exactly once.
   private touchdownTilt = 0
   private touchdownSpin = 0
-  private chuteState: 0 | 1 | 2 = 0
-  private tDrogue = 0
+  // Main-only recovery -- 0 stowed, 1 deployed. (Previously 0/1/2 with a
+  // drogue stage in between; simplified to a single main chute per the
+  // confirmed design: main parachute directly, no drogue.)
+  private chuteState: 0 | 1 = 0
   private tMain = 0
-  // True when FORCED_DEPLOY_ALT's safety-net trigger is what opened the
-  // chute (as opposed to the normal staged drogue->main sequence) --
-  // chuteArea() uses this to skip straight to full main area rather than
-  // the drogue-fraction opening, since a forced deploy by definition has
-  // no altitude margin left to stage it.
-  private forcedDeploy = false
 
   // environment
   private windScale = 0
@@ -639,9 +632,7 @@ export class RocketPhysicsEngine {
     this.touchdownTilt = 0
     this.touchdownSpin = 0
     this.chuteState = 0
-    this.tDrogue = 0
     this.tMain = 0
-    this.forcedDeploy = false
     this.windScale = 0
     this.gust = 0
     this.diag = { ...ZERO_DIAG }
@@ -714,12 +705,11 @@ export class RocketPhysicsEngine {
     this.aborted = true
     this.prop = 0
     if (this.tBurnout === null) this.tBurnout = this.time
-    // skip the drogue stage — force straight to main chute regardless of
-    // the normal gates (altitude, descent rate, dynamic pressure), since
-    // this is an emergency termination, not a nominal recovery sequence
-    if (this.chuteState !== 2) {
-      this.chuteState = 2
-      this.tDrogue = this.time
+    // Force the main chute open regardless of the normal gates (altitude,
+    // descent rate, dynamic pressure), since this is an emergency
+    // termination, not a nominal recovery sequence.
+    if (this.chuteState !== 1) {
+      this.chuteState = 1
       this.tMain = this.time
     }
   }
@@ -1307,52 +1297,33 @@ export class RocketPhysicsEngine {
   // ───────────────────────── recovery ─────────────────────────
 
   private updateChute(q: number, s: State13): void {
-    const burnedOut = this.prop <= 0 && this.tBurnout !== null && this.time > this.tBurnout + TAILOFF
+    if (this.chuteState !== 0) return
 
     // Forced safety-net deploy: descending (vy < 0) and at or below 100 m,
-    // with nothing open yet. Checked FIRST and unconditionally (no burnout
-    // or dynamic-pressure gate) so it can still catch a flight the staged
-    // sequence below missed entirely -- e.g. still above CHUTE_Q_MAX at
-    // burnout, which otherwise leaves chuteState stuck at 0 forever (see
-    // FORCED_DEPLOY_ALT's comment). Jumps straight to full main deployment
-    // (chuteState 2, forcedDeploy flagged) rather than drogue-first --
-    // there's no altitude margin left at 100 m to run the normal two-stage
-    // sequence, so this is deliberately the "last resort, open everything
-    // now" path, not a drogue trigger.
-    if (this.chuteState === 0 && s[4] < 0 && s[1] <= FORCED_DEPLOY_ALT) {
-      this.chuteState = 2
-      this.tDrogue = this.time
+    // with nothing open yet. Checked FIRST and unconditionally (no
+    // burnout or dynamic-pressure gate) so it can still catch a flight
+    // the normal trigger below missed entirely -- e.g. still above
+    // MAIN_Q_MAX at burnout, which otherwise leaves chuteState stuck at 0
+    // forever (see FORCED_DEPLOY_ALT's comment).
+    if (s[4] < 0 && s[1] <= FORCED_DEPLOY_ALT) {
+      this.chuteState = 1
       this.tMain = this.time
-      this.forcedDeploy = true
       return
     }
 
-    if (this.chuteState === 0) {
-      if (burnedOut && s[4] < -1 && s[1] > 20 && q < CHUTE_Q_MAX) {
-        this.chuteState = 1
-        this.tDrogue = this.time
-      }
-    } else if (this.chuteState === 1) {
-      if (s[4] < 0 && s[1] < MAIN_ALT && s[1] > 15 && q < MAIN_Q_MAX) {
-        this.chuteState = 2
-        this.tMain = this.time
-      }
+    // Normal trigger: descending, below MAIN_ALT, above a minimum
+    // altitude floor (avoids deploying the instant the vehicle clips
+    // MAIN_ALT right at ground level), and dynamic pressure low enough
+    // not to blow out the canopy.
+    if (s[4] < 0 && s[1] < MAIN_ALT && s[1] > 15 && q < MAIN_Q_MAX) {
+      this.chuteState = 1
+      this.tMain = this.time
     }
   }
 
   private chuteArea(): number {
     if (this.chuteState === 0) return 0
-    // Forced deploy opens full main area directly -- no drogue-fraction
-    // stage first, since by construction there was no altitude margin
-    // left to stage it (see updateChute()'s forced-deploy branch).
-    if (this.forcedDeploy) {
-      return this.chuteMainArea * smoothstep((this.time - this.tMain) / CHUTE_INFLATE)
-    }
-    const drogue = DROGUE_FRACTION * this.chuteMainArea * smoothstep((this.time - this.tDrogue) / CHUTE_INFLATE)
-    const main = this.chuteState === 2
-      ? this.chuteMainArea * smoothstep((this.time - this.tMain) / CHUTE_INFLATE)
-      : 0
-    return drogue + main
+    return this.chuteMainArea * smoothstep((this.time - this.tMain) / CHUTE_INFLATE)
   }
 
   // ───────────────────────── rail / ground ─────────────────────────
