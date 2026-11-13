@@ -9,6 +9,8 @@ import { CloudPass } from './CloudPass'
 import { buildVehicle, type VehicleModel } from './buildRocket'
 import { buildGround, type GroundResult } from './buildGround'
 import { buildSun } from './buildSun'
+import { SmokeParticles } from './SmokeParticles'
+import { buildLaunchPad, PAD_RELEASE, type LaunchPadRig } from './buildLaunchPad'
 import { metresToScene } from '../constants/scale'
 import { launchSite, launchSiteToRender } from '../constants/frames'
 import type { Telemetry, VehicleId, QualityTier } from '../types'
@@ -21,8 +23,22 @@ interface SceneProps {
   quality?: QualityTier
 }
 
-const GROUND_CLOUD_COUNT = 260
-const GROUND_CLOUD_WINDOW = 3.0
+// ---- Liftoff smoke tuning (sizes/speeds in metres, converted with metresToScene) ----
+const SMOKE_QUALITY: Record<QualityTier, number> = { low: 0.45, medium: 0.7, high: 1 }
+const POOL_TRAIL = 0
+const POOL_TRENCH = 1
+const POOL_COLUMN = 2
+// count = pool size at 'high'; rate = particles/s at full strength; life = s
+const SMOKE_TRAIL = { count: 2800, rate: 600, life: 7, size0M: 9, size1M: 85, fadeStartM: 10000, stopM: 12000 }
+const SMOKE_TRENCH = { count: 1700, rate: 380, life: 10, size0M: 20, size1M: 190, speedMinMps: 140, speedMaxMps: 330 }
+const SMOKE_COLUMN = { count: 1000, rate: 170, life: 9, size0M: 24, size1M: 220 }
+const SMOKE_PAD_HEIGHT_M = 320     // pad clouds stop once the nozzle is this high
+const PAD_RADIUS = 2.2             // launch pad radius, scene units (the pad mesh below)
+const LIFTOFF_ALT_M = 0.05         // physics liftedOff threshold (rocketPhysics.ts)
+// ---- Ignition camera shake / hold-down vibration ----
+const SHAKE_S = 4                  // seconds of shake after ignition
+const SHAKE_RAD = 0.006            // peak camera jitter, radians (~3 px at 960x720)
+const HOLD_VIBRATION = 0.0025      // rocket jitter while clamped, fraction of rocket height
 const TRENCH_CLOUD_COUNT = 140
 const HEAT_PEAK_ALTITUDE = 1200
 const HEAT_SCALE_HEIGHT = 8500
@@ -33,40 +49,70 @@ const STAR_FADE_START = 5000
 const STAR_FADE_FULL = 15000
 const STAR_MAX_OPACITY = 0.9
 
+// ---- Plume tuning (world length = rocketHeight * factor) ----
+// factor = (BASE + THROTTLE * throttle) * (1 + VACUUM * expansion)
+// -> ~0.95x rocket height at liftoff full throttle, ~2.2x in thin air.
+const PLUME_LEN_BASE = 0.55
+const PLUME_LEN_THROTTLE = 0.4
+const PLUME_LEN_VACUUM = 1.3
+
+// ---- Recovery rig tuning ----
+const CHUTE_INFLATE_S = 1.5     // canopy small -> full, seconds after deploy
+const RISER_PAYOUT_S = 0.6      // riser reaches full length, seconds after deploy
+const RISER_FRACTION = 0.3      // confluence point, fraction of riser length from the nose
+const RISER_DIR_RATE = 3.0      // 1/s, how fast the riser direction follows the airflow
+const HANG_BLEND_RATE = 1.6     // 1/s, body attitude: physics tumble -> hanging
+const PEND_PERIOD_S = 2.4       // pendulum swing period of the hanging body
+const PEND_ZETA = 0.14          // pendulum damping ratio (lower = more swings)
+const PEND_K = (2 * Math.PI / PEND_PERIOD_S) ** 2
+const PEND_C = 2 * PEND_ZETA * (2 * Math.PI / PEND_PERIOD_S)
+const CHUTE_SWAY = 0.06         // riser-direction sway amplitude once open
+const CHUTE_BREATHE = 0.035     // canopy breathing amplitude
+const LINE_RADIUS = 0.014       // suspension line radius, scene units
+const RISER_RADIUS = 0.03       // riser/bridle radius, scene units
+const UP_AXIS = new THREE.Vector3(0, 1, 0)
+
+function wrapAngle(a: number): number {
+  return a - Math.PI * 2 * Math.round(a / (Math.PI * 2))
+}
+
 // The renderer uses logarithmicDepthBuffer (needed for the 0.1 .. 800 000
 // near/far range of the true-scale planet). Every built-in material writes
 // log depth via gl_FragDepth; a custom ShaderMaterial must include the
 // logdepthbuf chunks itself, or its fragments are depth-tested with plain
 // perspective depth (~0.99) against the log-depth buffer (~0.2 for nearby
 // geometry) and get rejected wherever any opaque surface is behind them.
+//
+// Plume geometry: an open unit cylinder spanning local y in [-1, 0]
+// (y = 0 at the nozzle exit plane, y = -1 at the tail), radius 1. The
+// shader turns it into the real plume shape: length uLen, exit radius
+// uExitR, flaring with altitude (uExpansion). The plume mesh is a child of
+// nozzleGroup, so it inherits the gimbal tilt and the rocket's model scale.
 const PLUME_VERTEX = `
   #include <common>
   #include <logdepthbuf_pars_vertex>
-  uniform float expansionFactor;
-  uniform float time;
-  uniform float plumeLen;
-  varying float vY;
-  varying float vRadius;
+  uniform float uLen;
+  uniform float uExitR;
+  uniform float uExpansion;
+  uniform float uTime;
+  varying float vT;
   varying float vFresnel;
 
   void main() {
-    vec3 pos = position;
-    // Geometry now lives at local y in [-plumeLen, 0]: tip (throat, radius
-    // 0) at y=0, trailing bell at y=-plumeLen. t=0 at the throat, t=1 at
-    // the far end of the exhaust trail.
-    float t = clamp(-pos.y / plumeLen, 0.0, 1.0);
-    float machDisc = 1.0 - 0.35 * sin(t * 3.14159 * 3.0) * (1.0 - expansionFactor);
-    float baseRadius = t * (0.18 + expansionFactor * 0.55) * machDisc;
-    float flutter = 0.018 * sin(time * 8.0 + t * 12.0) * cos(time * 5.5 + t * 7.0);
-    baseRadius += flutter * (0.4 + expansionFactor * 0.6);
-    pos.x = pos.x * baseRadius * 2.0;
-    pos.z = pos.z * baseRadius * 2.0;
-    vY = t;
-    vRadius = baseRadius;
+    float t = clamp(-position.y, 0.0, 1.0);      // 0 at nozzle exit, 1 at tail
+    // Sea level: a tight column that only widens a little. Thin air: the
+    // exhaust balloons out (under-expanded plume).
+    float flare = mix(0.6, 4.5, uExpansion);
+    float r = uExitR * (1.0 + flare * pow(t, mix(1.3, 0.55, uExpansion)));
+    // Over-expanded necking near the exit at low altitude.
+    r *= 1.0 - 0.16 * (1.0 - uExpansion) * sin(t * PI * 5.0) * (1.0 - t);
+    // Turbulent flicker, stronger toward the tail.
+    r *= 1.0 + t * (0.07 * sin(uTime * 37.0 + t * 11.0) + 0.05 * sin(uTime * 23.0 + position.x * 6.0));
+    vec3 pos = vec3(position.x * r, position.y * uLen, position.z * r);
+    vT = t;
     vec4 mvPosition = modelViewMatrix * vec4(pos, 1.0);
-    vec3 transformedNormal = normalize(normalMatrix * normal);
-    vec3 viewDir = normalize(-mvPosition.xyz);
-    vFresnel = 1.0 - abs(dot(viewDir, transformedNormal));
+    vec3 n = normalize(normalMatrix * normal);
+    vFresnel = 1.0 - abs(dot(normalize(-mvPosition.xyz), n));
     gl_Position = projectionMatrix * mvPosition;
     #include <logdepthbuf_vertex>
   }
@@ -74,30 +120,32 @@ const PLUME_VERTEX = `
 
 const PLUME_FRAGMENT = `
   #include <logdepthbuf_pars_fragment>
-  uniform float expansionFactor;
-  varying float vY;
-  varying float vRadius;
+  uniform float uExpansion;
+  uniform float uTime;
+  uniform float uIntensity;
+  varying float vT;
   varying float vFresnel;
 
   void main() {
-    float core = 1.0 - smoothstep(0.0, 0.35, vY);
-    float mid  = smoothstep(0.0, 0.5, vY) * (1.0 - smoothstep(0.5, 1.0, vY));
-    float edge = smoothstep(0.6, 1.0, vY);
-    vec3 coreColor = vec3(1.0, 0.97, 0.88);
-    vec3 midColor  = vec3(1.0, 0.55, 0.12);
-    vec3 edgeColor = vec3(0.6, 0.15, 0.05);
-    // core/mid/edge are independent smoothsteps, not a partition of unity --
-    // they can overlap, so the summed color can exceed (1,1,1) component-wise.
-    // With additive blending across many overlapping plume fragments that
-    // feeds UnrealBloomPass an unbounded HDR spike, not a controlled bright
-    // region. Clamp to a fixed, intentional peak instead.
-    vec3 color = clamp(coreColor * core + midColor * mid + edgeColor * edge, 0.0, 1.6);
-    float opacity = (1.0 - vY * 0.7) * (0.95 - expansionFactor * 0.15);
-    float rimSoftness = 2.2;
-    float edgeFade = 1.0 - pow(vFresnel, rimSoftness);
-    opacity *= mix(0.55, 1.0, edgeFade);
-    opacity = clamp(opacity, 0.0, 1.0);
-    gl_FragColor = vec4(color, opacity);
+    float t = vT;
+    vec3 core   = vec3(1.0, 0.97, 0.88);
+    vec3 yellow = vec3(1.0, 0.80, 0.38);
+    vec3 orange = vec3(1.0, 0.45, 0.12);
+    vec3 tail   = vec3(0.45, 0.20, 0.08);
+    vec3 col = mix(core, yellow, smoothstep(0.0, 0.16, t));
+    col = mix(col, orange, smoothstep(0.14, 0.50, t));
+    col = mix(col, tail, smoothstep(0.50, 0.95, t));
+    // Shock diamonds: bright bands near the exit, sea level only.
+    float diamonds = pow(max(sin(t * 34.0 - 1.2), 0.0), 8.0)
+                   * (1.0 - smoothstep(0.05, 0.45, t)) * (1.0 - uExpansion);
+    col += vec3(1.0, 0.92, 0.75) * diamonds * 0.9;
+    // HDR boost in the core so UnrealBloomPass (threshold 0.8) picks it up.
+    col *= 1.0 + 1.4 * (1.0 - smoothstep(0.0, 0.3, t));
+    float edge = 1.0 - pow(clamp(vFresnel, 0.0, 1.0), 1.6);   // dense centre, soft silhouette
+    float flick = 0.88 + 0.12 * sin(uTime * 53.0 + t * 19.0);
+    float a = pow(1.0 - t, 1.4) * mix(0.15, 1.0, edge) * flick * uIntensity;
+    a *= mix(1.0, 0.6, uExpansion);                         // thinner, fainter in vacuum
+    gl_FragColor = vec4(min(col, vec3(2.4)), clamp(a, 0.0, 1.0));
     #include <logdepthbuf_fragment>
   }
 `
@@ -235,11 +283,6 @@ export function Scene({ telemetryRef, launched, vehicleId, selecting, quality = 
   const mountRef = useRef<HTMLDivElement>(null)
   const rocketRef = useRef<THREE.Group | null>(null)
   const nozzleGroupRef = useRef<THREE.Group | null>(null)
-  const particlesRef = useRef<THREE.Points | null>(null)
-  const particleVelocities = useRef<Float32Array | null>(null)
-  const groundCloudRef = useRef<THREE.Points | null>(null)
-  const groundCloudVel = useRef<Float32Array | null>(null)
-  const groundCloudAge = useRef<Float32Array | null>(null)
   const plumeRef = useRef<THREE.Mesh | null>(null)
   const plumeMaterialRef = useRef<THREE.ShaderMaterial | null>(null)
   const trenchLeftRef = useRef<THREE.Mesh | null>(null)
@@ -286,6 +329,13 @@ export function Scene({ telemetryRef, launched, vehicleId, selecting, quality = 
   // canopy rigidly glued above the nose.
   const chutePosRef = useRef(new THREE.Vector3())
   const chuteUpRef = useRef(new THREE.Vector3(0, 1, 0))
+  // Rig animation state: seconds since deploy, and the rendered body
+  // attitude's pendulum (angle/rate, radians) plus how far the body has
+  // blended from the physics attitude to "hanging under the canopy".
+  const chuteRigRef = useRef({ deployT: 0, phi: 0, phiVel: 0, hang: 0, active: false })
+  // Clears both smoke systems (trail + pad cloud) on "Fly again".
+  const smokeResetRef = useRef<(() => void) | null>(null)
+  const launchPadRef = useRef<LaunchPadRig | null>(null)
   const rafRef = useRef<number>(0)
   const clockRef = useRef(new THREE.Clock())
 
@@ -463,7 +513,7 @@ export function Scene({ telemetryRef, launched, vehicleId, selecting, quality = 
     const padRoughTexture = new THREE.CanvasTexture(padRoughCanvas)
     padRoughTexture.wrapS = THREE.RepeatWrapping; padRoughTexture.wrapT = THREE.RepeatWrapping; padRoughTexture.repeat.set(3, 3)
 
-    const padGeo = new THREE.CylinderGeometry(2.2, 2.2, 0.16, 24)
+    const padGeo = new THREE.CylinderGeometry(PAD_RADIUS, PAD_RADIUS, 0.16, 24)
     const padMat = new THREE.MeshStandardMaterial({
       color: 0xffffff, map: padTexture,
       roughnessMap: padRoughTexture, roughness: 0.8, metalness: 0.3
@@ -491,7 +541,7 @@ export function Scene({ telemetryRef, launched, vehicleId, selecting, quality = 
     const structMat = new THREE.MeshStandardMaterial({ color: 0x3a3a3e, roughness: 0.55, metalness: 0.75 })
     const deflectorMat = new THREE.MeshStandardMaterial({ color: 0x1c1c1e, roughness: 0.7, metalness: 0.6 })
 
-    const padRimGeo = new THREE.TorusGeometry(2.2, 0.05, 8, 32)
+    const padRimGeo = new THREE.TorusGeometry(PAD_RADIUS, 0.05, 8, 32)
     const padRim = new THREE.Mesh(padRimGeo, structMat)
     padRim.rotation.x = Math.PI / 2
     padRim.castShadow = true
@@ -520,10 +570,11 @@ export function Scene({ telemetryRef, launched, vehicleId, selecting, quality = 
       addStrut(inner, outer, 0.035, 0.05, structMat)
     }
 
-    const towerGeo = new THREE.BoxGeometry(0.15, 6, 0.15)
-    const towerMat = new THREE.MeshStandardMaterial({ color: 0x555555 })
-    const tower = new THREE.Mesh(towerGeo, towerMat)
-    tower.position.set(2.6, 2.75, 0); scene.add(tower)
+    // Launch tower, swing arms, umbilicals and hold-down clamps (replaces
+    // the old single tower box). Fitted per vehicle in swapVehicle().
+    const padRig = buildLaunchPad(PAD_RADIUS)
+    scene.add(padRig.group)
+    launchPadRef.current = padRig
 
     // ---- Flame trench ----
     const trenchGeo = new THREE.CylinderGeometry(0, 1, 0.2, 24, 1, false)
@@ -584,6 +635,23 @@ export function Scene({ telemetryRef, launched, vehicleId, selecting, quality = 
     let rocketHeight = 6
     let rocketRadius = 0.36
     let model: VehicleModel | null = null
+    // Per-vehicle plume fit, measured on swap. The plume lives in
+    // nozzleGroup-local space, which is scaled by the rocket's model scale
+    // (realistic height * ALTITUDE_SCALE / raw model height), so lengths
+    // in world units have to be divided by rocketScale before going into
+    // the shader.
+    let rocketScale = 1
+    let canopyRadius = 1.1
+    let nozzleExitY = 0     // nozzleGroup-local y of the nozzle exit plane
+    let nozzleExitR = 0.2   // nozzleGroup-local radius of the engine cluster
+    const nozzleBox = new THREE.Box3()
+    const nozzleGeoBox = new THREE.Box3()
+    function fitPlume(p: THREE.Mesh | null) {
+      if (!p) return
+      p.position.set(0, nozzleExitY, 0)
+      const m = p.material as THREE.ShaderMaterial
+      m.uniforms.uExitR.value = nozzleExitR * 0.8
+    }
 
     // ---- Recovery parachute: round canopy + simulated suspension lines ----
     // Round conventional canopy: a hemisphere with its DOME facing up/away
@@ -632,11 +700,44 @@ export function Scene({ telemetryRef, launched, vehicleId, selecting, quality = 
       lines.push(line)
     }
 
+    // Riser/bridle: one thicker cord from the nose attach point up to the
+    // confluence point where all suspension lines meet.
+    const riserMat = new THREE.MeshStandardMaterial({ color: 0x2a1c12, roughness: 0.8 })
+    const riser = new THREE.Mesh(lineGeom, riserMat)
+    riser.visible = false
+    scene.add(riser)
+    for (const line of lines) line.visible = false
+
     chuteGroup.visible = false
     scene.add(chuteGroup)
     chuteRef.current = chuteGroup
     chuteCanopyRef.current = canopy
     chuteLinesRef.current = lines
+
+    // Stretch/aim a unit cylinder (lineGeom: height 1, radius 1, centred)
+    // between two world points. No allocations: uses the scratch vectors.
+    const aimDelta = new THREE.Vector3()
+    function aimCylinder(mesh: THREE.Mesh, from: THREE.Vector3, to: THREE.Vector3, radius: number) {
+      aimDelta.subVectors(to, from)
+      const len = Math.max(aimDelta.length(), 0.001)
+      mesh.position.copy(from).addScaledVector(aimDelta, 0.5)
+      mesh.scale.set(radius, len, radius)
+      mesh.quaternion.setFromUnitVectors(UP_AXIS, aimDelta.divideScalar(len))
+      mesh.visible = true
+    }
+    function hideChuteRig() {
+      chuteGroup.visible = false
+      riser.visible = false
+      for (const line of lines) line.visible = false
+    }
+    const rigTargetDir = new THREE.Vector3()
+    const rigTmp = new THREE.Vector3()
+    const rigAttach = new THREE.Vector3()
+    const rigConfluence = new THREE.Vector3()
+    const rigCanopy = new THREE.Vector3()
+    const rigRim = new THREE.Vector3()
+    const rigRight = new THREE.Vector3()
+    const rigFwd = new THREE.Vector3()
 
     const swapVehicle = (id: VehicleId, q: QualityTier) => {
       // The plume is a child of nozzleGroup (see "---- Plume ----" below),
@@ -644,7 +745,8 @@ export function Scene({ telemetryRef, launched, vehicleId, selecting, quality = 
       // disposed, or it would be destroyed along with the vehicle it's
       // leaving. Three.js's add() on a new parent reparents in place --
       // no geometry/material recreation needed, so this is cheap and
-      // keeps the shader uniforms (expansionFactor, time) untouched.
+      // keeps the shader uniforms untouched. fitPlume() below re-seats it on
+      // the new vehicle's nozzle exit plane.
       const plume = plumeRef.current
       if (plume) scene.add(plume)  // temporary parent so it survives the old model's disposal
 
@@ -658,14 +760,30 @@ export function Scene({ telemetryRef, launched, vehicleId, selecting, quality = 
       rocketRef.current = rocket
       nozzleGroupRef.current = model.nozzleGroup
       rocketHeight = model.height
+      padRig.fit(rocket, rocketHeight)
+      padRig.reset()
       const bb = new THREE.Box3().setFromObject(rocket)
       rocketRadius = Math.max(Math.abs(bb.min.x), bb.max.x, 0.3)
+      rocketScale = rocket.scale.x
+      // Nozzle exit plane + cluster radius, from the gimballed nozzle
+      // meshes' own geometry (nozzleGroup children carry no transform).
+      nozzleBox.makeEmpty()
+      for (const c of model.nozzleGroup.children) {
+        const g = (c as THREE.Mesh).geometry
+        if (!g) continue
+        g.computeBoundingBox()
+        if (g.boundingBox) nozzleBox.union(nozzleGeoBox.copy(g.boundingBox))
+      }
+      if (!nozzleBox.isEmpty()) {
+        nozzleExitY = nozzleBox.min.y
+        nozzleExitR = Math.max(nozzleBox.max.x, -nozzleBox.min.x, nozzleBox.max.z, -nozzleBox.min.z)
+      }
       // Scale the canopy to this vehicle's size -- a skinny strap-on
       // vehicle and the broad Steel vehicle both get a proportionate,
       // clearly visible chute. canopy/riser are scene-parented (see
       // chuteRef's declaration above), so this is the mesh's own local
       // scale, independent of the rocket's scale/rotation.
-      const canopyRadius = Math.max(rocketRadius * 2.2, 1.1)
+      canopyRadius = Math.max(rocketRadius * 2.2, 1.1)
       chuteCanopyRef.current?.scale.setScalar(canopyRadius)
       seams.scale.setScalar(canopyRadius)
       // Riser length was previously derived from canopyRadius (rocket
@@ -691,6 +809,7 @@ export function Scene({ telemetryRef, launched, vehicleId, selecting, quality = 
       chuteUpRef.current.set(0, 1, 0)
 
       if (plume) model.nozzleGroup.add(plume)
+      fitPlume(plume)
     }
     swapRef.current = swapVehicle
     swapVehicle(vehicleRef.current, qualityRef.current)
@@ -703,33 +822,26 @@ export function Scene({ telemetryRef, launched, vehicleId, selecting, quality = 
     let lastFrameT = performance.now()
 
     // ---- Plume ----
-    // Parented directly to the nozzle group (a real child in the rocket's
-    // local space), not a standalone scene object synced by hand every
-    // frame. This was the actual source of the "visible at liftoff, gone
-    // later" bug: a free-floating mesh repositioned/rescaled each frame
-    // fights Three.js's cached world-matrix/bounding-sphere bookkeeping,
-    // and any one-frame desync (vehicle swap, a skipped frame under load,
-    // the camera's logarithmic pullback outrunning a hand-rolled scale
-    // curve) makes it drift off screen or get frustum-culled. As a child
-    // of nozzleGroup it inherits position, gimbal rotation AND the
-    // rocket's own model scale automatically and exactly, every frame,
-    // with zero hand-sync code — it physically cannot end up anywhere
-    // other than "at the nozzle", which is also physically correct: the
-    // exhaust plume's whole job is to trail from the engine bell.
+    // Parented to the nozzle group so it inherits the engine position,
+    // gimbal tilt and the rocket's model scale. Geometry is an open unit
+    // cylinder spanning local y in [-1, 0]: y = 0 sits on the nozzle exit
+    // plane (fitPlume positions it there), y = -1 is the tail, so the
+    // plume points DOWN out of the engine. The vertex shader sets the real
+    // length (uLen) and radius profile.
     //
-    // Geometry: nozzleMountY is near the base of the rocket group (local
-    // space, +Y up), so the plume must point further in -Y (downward, out
-    // the back of the engine). CylinderGeometry(radiusTop, radiusBottom,
-    // height) places radiusTop at local +height/2 and radiusBottom at
-    // local -height/2. We want radius 0 (the throat) at local y=0 and the
-    // widening exhaust trailing to y=-PLUME_LEN, so: radiusTop=0,
-    // radiusBottom=1, then translate up by +height/2 so the tip sits at
-    // y=0 exactly, with the bell of the cone hanging below it.
-    const PLUME_LEN = 2.2
-    const plumeGeo = new THREE.CylinderGeometry(0, 1, PLUME_LEN, 24, 32, true)
-    plumeGeo.translate(0, PLUME_LEN / 2, 0)
+    // (Previous bug: a 0->1 cone translated by +height/2, i.e. pointing UP
+    // into the rocket, with the shader computing t = -y/len, which was 0
+    // for every vertex -> radius ~0 -> an invisible needle inside the body.)
+    const plumeGeo = new THREE.CylinderGeometry(1, 1, 1, 28, 40, true)
+    plumeGeo.translate(0, -0.5, 0)
     const plumeMat = new THREE.ShaderMaterial({
-      uniforms: { expansionFactor: { value: 0.0 }, time: { value: 0.0 }, plumeLen: { value: PLUME_LEN } },
+      uniforms: {
+        uLen: { value: 1 },
+        uExitR: { value: 0.2 },
+        uExpansion: { value: 0 },
+        uTime: { value: 0 },
+        uIntensity: { value: 0 },
+      },
       vertexShader: PLUME_VERTEX, fragmentShader: PLUME_FRAGMENT,
       transparent: true, depthWrite: false, side: THREE.DoubleSide,
       blending: THREE.AdditiveBlending
@@ -738,36 +850,48 @@ export function Scene({ telemetryRef, launched, vehicleId, selecting, quality = 
     plume.visible = false
     plume.renderOrder = 999
     plume.frustumCulled = false
-    plume.matrixAutoUpdate = true
     nozzleGroupRef.current?.add(plume)
     plumeRef.current = plume; plumeMaterialRef.current = plumeMat
+    fitPlume(plume)
+    // Smoothed plume drivers (time-based easing in the render loop).
+    let plumeThrottle = 0
+    let plumeLenWorld = 0
 
-    // ---- Exhaust particles ----
-    const PARTICLE_COUNT = 200
-    const positions = new Float32Array(PARTICLE_COUNT * 3)
-    const velocities = new Float32Array(PARTICLE_COUNT * 3)
-    for (let i = 0; i < PARTICLE_COUNT; i++) {
-      positions[i * 3] = 0; positions[i * 3 + 1] = 0; positions[i * 3 + 2] = 0
-      velocities[i * 3] = 0; velocities[i * 3 + 1] = 0; velocities[i * 3 + 2] = 0
+    // ---- Liftoff smoke: ONE Points draw call, three particle pools ----
+    // (see SmokeParticles.ts)
+    //  POOL_TRAIL  : exhaust trail spawned at the plume tail each frame and
+    //                left in world space, so the rocket outruns it.
+    //  POOL_TRENCH : flame-trench cloud blasted sideways along the ground in
+    //                both directions, slowing, rising and swelling.
+    //  POOL_COLUMN : vertical column billowing up around the pad.
+    // NormalBlending (smoke); the hot core glow stays additive (plume mesh,
+    // trench fans, trench puffs). Pool sizes scale with the quality tier.
+    const smokeQ = SMOKE_QUALITY[qualityRef.current]
+    const smoke = new SmokeParticles([
+      { count: Math.round(SMOKE_TRAIL.count * smokeQ), life: SMOKE_TRAIL.life, drag: 0.9, buoyancy: 0.15, turbulence: 0.8, groundY: 0.1 },
+      { count: Math.round(SMOKE_TRENCH.count * smokeQ), life: SMOKE_TRENCH.life, drag: 0.6, buoyancy: 0.3, turbulence: 1.2, groundY: 0.2 },
+      { count: Math.round(SMOKE_COLUMN.count * smokeQ), life: SMOKE_COLUMN.life, drag: 0.7, buoyancy: 0.55, turbulence: 1.0, groundY: 0.2 },
+    ], { opacity: 0.55, smokeColor: 0xf4f1ec, shadowColor: 0x77716b })
+    smoke.points.renderOrder = 5     // after opaque + trench fans; the plume (999) still draws on top
+    scene.add(smoke.points)
+    smokeResetRef.current = () => smoke.reset()
+    // World units -> drawing-buffer pixels at distance 1, for gl_PointSize.
+    function smokePxPerUnit(cssHeight: number): number {
+      return (cssHeight * renderer.getPixelRatio()) / (2 * Math.tan(THREE.MathUtils.degToRad(camera.fov) / 2))
     }
-    particleVelocities.current = velocities
-    const particleGeo = new THREE.BufferGeometry()
-    particleGeo.setAttribute('position', new THREE.BufferAttribute(positions, 3))
-    const particleMat = new THREE.PointsMaterial({ color: 0xffaa33, size: 0.35, transparent: true, opacity: 0.85, depthWrite: false, blending: THREE.AdditiveBlending })
-    const particles = new THREE.Points(particleGeo, particleMat)
-    scene.add(particles); particlesRef.current = particles
-
-    // ---- Ground ignition cloud ----
-    const cloudPositions = new Float32Array(GROUND_CLOUD_COUNT * 3)
-    const cloudVel = new Float32Array(GROUND_CLOUD_COUNT * 3)
-    const cloudAge = new Float32Array(GROUND_CLOUD_COUNT)
-    for (let i = 0; i < GROUND_CLOUD_COUNT; i++) { cloudPositions[i * 3 + 1] = -100; cloudAge[i] = 999 }
-    groundCloudVel.current = cloudVel; groundCloudAge.current = cloudAge
-    const cloudGeo = new THREE.BufferGeometry()
-    cloudGeo.setAttribute('position', new THREE.BufferAttribute(cloudPositions, 3))
-    const cloudMat = new THREE.PointsMaterial({ color: 0xf0f0f0, size: 1.1, transparent: true, opacity: 0.75, depthWrite: false, sizeAttenuation: true })
-    const groundCloud = new THREE.Points(cloudGeo, cloudMat)
-    scene.add(groundCloud); groundCloudRef.current = groundCloud
+    smoke.setPxPerUnit(smokePxPerUnit(height))
+    let trailSpawnAcc = 0
+    let trenchSpawnAcc = 0
+    let columnSpawnAcc = 0
+    let smokePrevValid = false
+    const smokePrev = new THREE.Vector3()
+    const smokeTail = new THREE.Vector3()
+    const smokeExit = new THREE.Vector3()
+    const smokeDir = new THREE.Vector3()
+    const smokeQuat = new THREE.Quaternion()
+    const smokeLerp = new THREE.Vector3()
+    // Release sequence: sim time of physics liftoff (altitude first > 0.05 m).
+    let firstRiseT = -1
 
     // ---- Post-processing ----
     // The scene is rendered into a target that keeps a depth texture, which
@@ -824,6 +948,16 @@ export function Scene({ telemetryRef, launched, vehicleId, selecting, quality = 
     chromaPass.enabled = false
     composer.addPass(chromaPass)
     composer.addPass(new OutputPass())
+
+    // Compile every material up front (including ones that start hidden:
+    // plume, trench fans, chute) so the first ignition frame does not stall
+    // on shader compilation -- and any GLSL error shows at page load.
+    {
+      const hidden: THREE.Object3D[] = [plume, trenchLeft, trenchRight, chuteGroup]
+      for (const o of hidden) o.visible = true
+      renderer.compile(scene, camera)
+      for (const o of hidden) o.visible = false
+    }
 
     const rocketWorldPos = new THREE.Vector3()
 
@@ -885,8 +1019,6 @@ export function Scene({ telemetryRef, launched, vehicleId, selecting, quality = 
       const telemetry = launchedRef.current ? telemetryRef.current : null
       const r = rocketRef.current
       const ng = nozzleGroupRef.current
-      const p = particlesRef.current
-      const gc = groundCloudRef.current
       const plume = plumeRef.current
       const plumeMat = plumeMaterialRef.current
       const tLeft = trenchLeftRef.current
@@ -899,6 +1031,7 @@ export function Scene({ telemetryRef, launched, vehicleId, selecting, quality = 
       const nowT = performance.now()
       const frameMs = nowT - lastFrameT
       lastFrameT = nowT
+      const frameDt = Math.min(Math.max(frameMs / 1000, 0), 0.1)
       // Adaptive quality: if the average frame is slower than ~30 fps while
       // sitting on the pad, step the vehicle detail down one tier.
       if (frameMs < 250) { frameAcc += frameMs; frameN++ }
@@ -916,8 +1049,17 @@ export function Scene({ telemetryRef, launched, vehicleId, selecting, quality = 
         }
       }
 
+      if (!telemetry) {
+        // Nothing flight-related is drawn on the pad / selection screen.
+        hideChuteRig()
+        smokePrevValid = false
+        plumeThrottle = 0
+        firstRiseT = -1
+      }
+
       if (r && !telemetry) {
         // ---- Pad / selection: turntable + framing camera ----
+        let padAttach = false
         if (selectingRef.current) {
           r.rotation.y += (frameMs / 1000) * 0.6
           camera.position.lerp(selectCam, 0.08)
@@ -928,7 +1070,10 @@ export function Scene({ telemetryRef, launched, vehicleId, selecting, quality = 
           r.rotation.y += (target - r.rotation.y) * 0.12
           camera.position.lerp(idleCam, 0.08)
           camera.lookAt(0, 3, 0)
+          // Arms swing in and clamps close once the turntable has settled.
+          padAttach = Math.abs(target - r.rotation.y) < 0.05
         }
+        padRig.updateIdle(padAttach, frameDt, r)
       }
 
       if (r && telemetry) {
@@ -937,19 +1082,84 @@ export function Scene({ telemetryRef, launched, vehicleId, selecting, quality = 
         // The model's origin is at its base, so rotating the group directly
         // would swing the whole rocket around its tail. Instead place the CG
         // where the physics says it is and derive the base position from it.
-        const phi = -(telemetry.bodyAngle * Math.PI) / 180          // CCW-positive on screen
+        const dt = Math.min(Math.max(frameMs / 1000, 0), 0.1)
+        const rig = chuteRigRef.current
+        const deployed = telemetry.chuteState === 1
+        const flying = telemetry.outcome === 'flying'
+        const physPhi = -(telemetry.bodyAngle * Math.PI) / 180     // CCW-positive on screen
+
+        // ---- Recovery rig, part 1: riser direction + hanging attitude ----
+        // chuteUpRef is the unit direction from the attach point (nose) to
+        // the canopy. The canopy streams opposite the AIR-relative velocity
+        // (it trails upstream of the airflow); at low airspeed it falls back
+        // to world up. Only the DIRECTION is smoothed -- the canopy is then
+        // placed at exactly riser length from this frame's nose, so it can
+        // never trail sideways behind a fast-moving rocket.
+        if (deployed) {
+          if (!rig.active) {
+            rig.active = true
+            rig.deployT = 0
+            rig.phi = physPhi
+            rig.phiVel = 0
+            rig.hang = 0
+            chuteScaleRef.current = 0
+            // The riser pays out of the nose, along the body axis.
+            chuteUpRef.current.set(-Math.sin(physPhi), Math.cos(physPhi), 0)
+          }
+          rig.deployT += dt
+          const ax = telemetry.lateralVelocity - telemetry.windSpeed
+          const ay = telemetry.velocity
+          const az = telemetry.velocityZ
+          const airspeed = Math.hypot(ax, ay, az)
+          rigTargetDir.set(0, 1, 0)
+          if (airspeed > 1e-3) {
+            rigTmp.set(-ax / airspeed, -ay / airspeed, -az / airspeed)
+            rigTargetDir.lerp(rigTmp, THREE.MathUtils.smoothstep(airspeed, 2, 12))
+          }
+          // Slow canopy sway once it is open.
+          rigTargetDir.x += CHUTE_SWAY * chuteScaleRef.current * Math.sin(elapsed * 1.3)
+          if (rigTargetDir.lengthSq() < 1e-6) rigTargetDir.set(0, 1, 0)
+          rigTargetDir.normalize()
+          chuteUpRef.current.lerp(rigTargetDir, 1 - Math.exp(-RISER_DIR_RATE * dt)).normalize()
+
+          // Inflation: riser pays out first, canopy opens over ~1.5 s from
+          // the nose; on touchdown/crash it deflates.
+          chuteScaleRef.current = flying
+            ? THREE.MathUtils.smoothstep(rig.deployT, 0.15, CHUTE_INFLATE_S)
+            : chuteScaleRef.current * Math.exp(-1.5 * dt)
+
+          // Hanging attitude: a damped pendulum chasing "body axis along
+          // the riser", started from the tumble attitude at deploy, so the
+          // body swings through and settles under the canopy.
+          const hangTarget = flying ? 1 : 0
+          rig.hang += (hangTarget - rig.hang) * (1 - Math.exp(-HANG_BLEND_RATE * dt))
+          const phiHang = Math.atan2(-chuteUpRef.current.x, chuteUpRef.current.y)
+          const steps = Math.max(1, Math.ceil(dt / (1 / 240)))
+          const h = dt / steps
+          for (let s = 0; s < steps; s++) {
+            const err = wrapAngle(rig.phi - phiHang)
+            rig.phiVel += (-PEND_K * err - PEND_C * rig.phiVel) * h
+            rig.phi += rig.phiVel * h
+          }
+        } else {
+          if (rig.active) { rig.active = false; rig.deployT = 0; chuteScaleRef.current = 0 }
+          rig.hang = 0
+          rig.phi = physPhi
+          rig.phiVel = 0
+        }
+        const phi = physPhi + rig.hang * wrapAngle(rig.phi - physPhi)
+
+        // ---- Pose: rotate the model about its centre of gravity ----
+        // The physics state is the CG's position and the body's pitch angle.
+        // The model's origin is at its base, so rotating the group directly
+        // would swing the whole rocket around its tail. Instead place the CG
+        // where the physics says it is and derive the base position from it.
         const cgFromBase = telemetry.bodyLength > 0
           ? (1 - telemetry.centerOfGravity / telemetry.bodyLength) * rocketHeight
           : 0.45 * rocketHeight
         // telemetry.lateralOffset/altitude/positionZ are the physics engine's
-        // own launch-site-frame position (metres, +X East / +Y Up / +Z North
-        // — see rocketPhysics.ts's header and constants/frames.ts). Tag them
-        // as such and convert through the one shared launchSiteToRender()
-        // instead of each call site in this file applying its own
-        // `* ALTITUDE_SCALE` to whichever component it happens to need —
-        // that per-site pattern is exactly what let buildGround.ts,
-        // buildRocket.ts and this file drift to three independent copies of
-        // the scale factor itself before the constants-module fix.
+        // launch-site-frame position (metres, +X East / +Y Up / +Z North),
+        // converted through the one shared launchSiteToRender().
         const cgPosLS = launchSite(telemetry.lateralOffset, telemetry.altitude, telemetry.positionZ)
         const cgPosRender = launchSiteToRender(cgPosLS)
         const cgX = cgPosRender[0]
@@ -957,13 +1167,6 @@ export function Scene({ telemetryRef, launched, vehicleId, selecting, quality = 
         r.rotation.z = phi
         r.position.x = cgX + cgFromBase * Math.sin(phi)
         r.position.y = cgY - cgFromBase * Math.cos(phi)
-        // Previously left at Three.js's default 0 unconditionally — this is
-        // the actual out-of-plane position now that cgPosRender carries a
-        // real Z component (telemetry.positionZ, frame-converted above).
-        // Zero effect today (positionZ is always 0, nothing in the current
-        // control model yaws), but it's the correct source going forward
-        // rather than an assumption baked into every downstream read of
-        // r.position.z.
         r.position.z = cgPosRender[2]
         // Keep any tilted body above the pad/ground (matters after a crash or
         // a landing at an angle; zero effect for an upright rocket).
@@ -971,101 +1174,64 @@ export function Scene({ telemetryRef, launched, vehicleId, selecting, quality = 
           r.position.y + Math.min(0, rocketHeight * Math.cos(phi)) - rocketRadius * Math.abs(Math.sin(phi))
         if (lowest < 0) r.position.y -= lowest
 
-        // ---- Nozzle gimbal rotation ----
+        // ---- Hold-down release sequence (visual only; pose is physics) ----
+        // Clamps let go at RELEASE_T, or at the moment physics lifts off if
+        // that comes first, so they never visibly hold a rising rocket.
+        if (firstRiseT < 0 && telemetry.altitude > LIFTOFF_ALT_M) firstRiseT = telemetry.time
+        const releaseT = firstRiseT >= 0 ? Math.min(PAD_RELEASE.RELEASE_T, firstRiseT) : PAD_RELEASE.RELEASE_T
+        // Slight vibration while the engine runs against the clamps.
+        if (telemetry.stage === 'powered-ascent' && telemetry.time < releaseT) {
+          const amp = rocketHeight * HOLD_VIBRATION * plumeThrottle
+          r.position.x += amp * Math.sin(elapsed * 71.0)
+          r.position.z += amp * Math.sin(elapsed * 53.0 + 1.3)
+        }
+        padRig.updateFlight(telemetry.time, releaseT, frameDt, r)
+
+        // ---- Nozzle gimbal rotation (frame-rate independent easing) ----
         if (ng) {
-          ng.rotation.z = THREE.MathUtils.lerp(
-            ng.rotation.z,
-            (telemetry.gimbalAngle * Math.PI) / 180,
-            0.15
-          )
+          ng.rotation.z += ((telemetry.gimbalAngle * Math.PI) / 180 - ng.rotation.z) * (1 - Math.exp(-10 * dt))
         }
 
-        if (p) {
-          const zoomFactor = Math.min(r.position.y / 15, 1)
-          ;(p.material as THREE.PointsMaterial).size = 0.15 + zoomFactor * 0.25
-        }
+        // ---- Recovery rig, part 2: place canopy, lines and riser ----
+        // Everything is computed from THIS frame's final body pose, so the
+        // riser starts exactly at the nose and every suspension line ends
+        // exactly at the confluence point on the riser.
+        if (rig.active && chuteScaleRef.current > 0.005) {
+          const inflate = chuteScaleRef.current
+          const up = chuteUpRef.current
+          // Attach point = nose tip, along the body's own axis.
+          rigAttach.set(-Math.sin(phi), Math.cos(phi), 0)
+            .multiplyScalar(rocketHeight).add(r.position)
+          const payout = THREE.MathUtils.smoothstep(rig.deployT, 0, RISER_PAYOUT_S)
+          const riserLen = chuteRiserLenRef.current * payout
+          rigConfluence.copy(rigAttach).addScaledVector(up, riserLen * RISER_FRACTION)
+          rigCanopy.copy(rigAttach).addScaledVector(up, riserLen)
 
-        // ---- Descent/recovery chute (simulated rig) ----
-        // Main-only recovery now (chuteState is 0|1 -- see rocketPhysics.ts),
-        // so "deployed" is just chuteState === 1, no drogue/main distinction
-        // to render differently any more.
-        if (chuteRef.current) {
-          const deployed = telemetry.chuteState === 1
-          chuteRef.current.visible = deployed
-          for (const line of chuteLinesRef.current) line.visible = deployed
-          if (deployed) {
-            // 0 -> 1 inflation scale over ~0.6s of game-visible scale-up;
-            // independent of the physics engine's own (longer) aerodynamic
-            // inflation curve -- this is purely a render polish cue, not a
-            // stand-in for chuteCdS.
-            chuteScaleRef.current = THREE.MathUtils.lerp(chuteScaleRef.current, 1, 0.12)
-            chuteRef.current.scale.setScalar(chuteScaleRef.current)
+          chuteGroup.visible = true
+          chuteGroup.position.copy(rigCanopy)
+          chuteGroup.quaternion.setFromUnitVectors(UP_AXIS, up)
+          const open = 0.08 + 0.92 * inflate
+          chuteGroup.scale.setScalar(open)
+          // Breathing: the canopy pulses wider/flatter, then taller/narrower.
+          const breathe = 1 + CHUTE_BREATHE * inflate * Math.sin(elapsed * Math.PI * 2 * 0.7)
+          canopy.scale.set(canopyRadius * breathe, canopyRadius * (2 - breathe), canopyRadius * breathe)
+          seams.scale.copy(canopy.scale)
 
-            // Nose tip in world space -- r.position is the rocket's
-            // BASE/tail (see the pose block above: the group's origin is
-            // the base, the CG is derived from it going UP from there), so
-            // the nose is base + full rocketHeight along world Y. This is
-            // the one point the rig is actually anchored to; everything
-            // else below is relative to it.
-            const noseWorld = new THREE.Vector3(r.position.x, r.position.y + rocketHeight, r.position.z)
-            const riserLen = chuteRiserLenRef.current
-
-            // ---- Simulated rig: spring-damped target, not a hard snap ----
-            // Target position: straight up (world +Y) from the nose by
-            // riserLen -- a real deployed canopy orients to airflow/gravity,
-            // not the body's long axis, so this deliberately ignores body
-            // attitude (phi) entirely, same reasoning as before. What's
-            // NEW is that the canopy doesn't jump straight to this target
-            // every frame -- it's eased toward it (chutePosRef), so a body
-            // swinging or tumbling underneath visibly drags the canopy
-            // with a short lag instead of the canopy teleporting rigidly
-            // in lockstep. Target orientation is always world-up (airflow-
-            // aligned); the canopy's CURRENT up-vector (chuteUpRef) eases
-            // toward that too, rather than inheriting body roll outright --
-            // so a rocket that's rolling or tumbling underneath doesn't
-            // spin the canopy with it, but a brief attitude change still
-            // reads as a small, settling wobble rather than an instant
-            // re-snap.
-            const targetPos = noseWorld.clone().add(new THREE.Vector3(0, riserLen, 0))
-            const targetUp = new THREE.Vector3(0, 1, 0)
-            // Lower damping factor than the pure-cosmetic scale lerp above
-            // -- this is the rig's actual sway/lag, so it's deliberately
-            // slower (more visible) than the inflation-scale animation.
-            chutePosRef.current.lerp(targetPos, 0.06)
-            chuteUpRef.current.lerp(targetUp, 0.08).normalize()
-            chuteRef.current.position.copy(chutePosRef.current)
-            chuteRef.current.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), chuteUpRef.current)
-
-            // ---- Suspension lines: real cylinder geometry, aimed live ----
-            // LINE_COUNT points evenly spaced around the canopy's rim
-            // (world space, using the canopy's EASED position/orientation
-            // above, not the raw target), each converging to the single
-            // riser attachment at the nose. Early in deployment
-            // (chuteScaleRef well below 1) the rim radius used here is
-            // scaled down with it, so the lines visibly start short/slack
-            // near the nose and lengthen out to full span as the canopy
-            // inflates -- the sag/tension cue -- rather than snapping to
-            // full-length taut lines the instant chuteState flips.
-            const lines = chuteLinesRef.current
-            const n = lines.length
-            const canopyRadiusWorld = (chuteCanopyRef.current?.scale.x ?? 1) * chuteScaleRef.current
-            const rightAxis = new THREE.Vector3(1, 0, 0).applyQuaternion(chuteRef.current.quaternion)
-            const fwdAxis = new THREE.Vector3(0, 0, 1).applyQuaternion(chuteRef.current.quaternion)
-            const LINE_RADIUS = 0.012
-            for (let i = 0; i < n; i++) {
-              const ang = (i / n) * Math.PI * 2
-              const rim = chutePosRef.current.clone()
-                .addScaledVector(rightAxis, Math.cos(ang) * canopyRadiusWorld)
-                .addScaledVector(fwdAxis, Math.sin(ang) * canopyRadiusWorld)
-              const seg = new THREE.Vector3().subVectors(noseWorld, rim)
-              const len = Math.max(seg.length(), 0.001)
-              const mid = rim.clone().addScaledVector(seg, 0.5)
-              const line = lines[i]
-              line.position.copy(mid)
-              line.scale.set(LINE_RADIUS, len, LINE_RADIUS)
-              line.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), seg.clone().normalize())
-            }
+          const rimR = canopyRadius * breathe * open
+          rigRight.set(1, 0, 0).applyQuaternion(chuteGroup.quaternion)
+          rigFwd.set(0, 0, 1).applyQuaternion(chuteGroup.quaternion)
+          const lines = chuteLinesRef.current
+          const n = lines.length
+          for (let i = 0; i < n; i++) {
+            const ang = (i / n) * Math.PI * 2
+            rigRim.copy(rigCanopy)
+              .addScaledVector(rigRight, Math.cos(ang) * rimR)
+              .addScaledVector(rigFwd, Math.sin(ang) * rimR)
+            aimCylinder(lines[i], rigRim, rigConfluence, LINE_RADIUS)
           }
+          aimCylinder(riser, rigConfluence, rigAttach, RISER_RADIUS)
+        } else {
+          hideChuteRig()
         }
 
         // ---- Dynamic chase camera ----
@@ -1077,40 +1243,39 @@ export function Scene({ telemetryRef, launched, vehicleId, selecting, quality = 
           cgPosRender[2] + chaseOffset.z
         )
         camera.lookAt(cgX, cgY, cgPosRender[2])
+        // Ignition / liftoff shake: small, decaying, a few pixels.
+        if (telemetry.stage === 'powered-ascent' && telemetry.time < SHAKE_S) {
+          const fade = 1 - telemetry.time / SHAKE_S
+          const amp = SHAKE_RAD * plumeThrottle * fade * fade
+          camera.rotateX(amp * Math.sin(elapsed * 37.0))
+          camera.rotateY(amp * Math.sin(elapsed * 29.0 + 1.7))
+        }
 
         groundResultRef.current?.update(telemetry.altitude)
 
         const isThrusting = telemetry.stage === 'powered-ascent'
 
         if (plume && plumeMat) {
-          // Physics gate: visible exactly while the engine is actually
-          // producing thrust, nothing else. No altitude/position hacks --
-          // the parent-child transform chain (rocket -> nozzleGroup ->
-          // plume) already guarantees correct placement and gimbal tilt
-          // for free, every frame, even through vehicle swaps or dropped
-          // frames.
-          plume.visible = isThrusting
-          if (isThrusting) {
-            // Vacuum expansion: real nozzle plumes flare wider and longer
-            // as ambient pressure drops with altitude. Pure physics-driven
-            // shaping, independent of camera/rendering concerns -- the
-            // parent chain handles making it *visible*, this just makes
-            // it look *right*.
-            const expansionFactor = 1.0 - Math.exp(-telemetry.altitude / 8500)
-            plumeMat.uniforms.expansionFactor.value = expansionFactor
-            // Simulation time (from the interpolated render snapshot), not
-            // wall-clock `elapsed` — the plume's flutter phase must track
-            // the same timestamp the pose/camera were interpolated at, so
-            // a paused tab or a variable frame rate can't desync the
-            // exhaust's visual turbulence from the instant it's actually
-            // being drawn for.
-            plumeMat.uniforms.time.value = telemetry.time
-            // Local-space scale only -- the rocket's own model scale and
-            // world transform are already applied by the parent chain, so
-            // this is purely "how much does the plume grow relative to
-            // the engine bell it's attached to," not a world-space fudge.
-            const plumeScale = 1.0 + expansionFactor * 2.2
-            plume.scale.set(plumeScale, plumeScale, plumeScale)
+          // Engine-on gate from physics; throttle eased (time-based) so the
+          // flame grows/shrinks instead of popping.
+          const burning = isThrusting && telemetry.thrustNewtons > 0
+          const thrTarget = burning ? THREE.MathUtils.clamp(telemetry.throttle, 0.3, 1) : 0
+          plumeThrottle += (thrTarget - plumeThrottle) * (1 - Math.exp(-8 * dt))
+          plume.visible = plumeThrottle > 0.02
+          if (plume.visible) {
+            // Vacuum expansion: the plume flares wider and longer as
+            // ambient pressure drops with altitude.
+            const expansion = 1.0 - Math.exp(-telemetry.altitude / 8500)
+            // World-space length as a multiple of the rocket's height:
+            // ~0.95x at liftoff (full throttle), up to ~2.2x in thin air.
+            plumeLenWorld = rocketHeight * (PLUME_LEN_BASE + PLUME_LEN_THROTTLE * plumeThrottle) * (1 + PLUME_LEN_VACUUM * expansion)
+            const u = plumeMat.uniforms
+            u.uLen.value = plumeLenWorld / rocketScale     // nozzleGroup-local units
+            u.uExpansion.value = expansion
+            u.uIntensity.value = plumeThrottle
+            // Wall-clock time for the flicker: telemetry.time is rounded to
+            // 0.01 s, which made the fast flicker terms step unevenly.
+            u.uTime.value = elapsed
           }
         }
 
@@ -1211,63 +1376,97 @@ export function Scene({ telemetryRef, launched, vehicleId, selecting, quality = 
         starMat.opacity = starT * starT * (3 - 2 * starT) * STAR_MAX_OPACITY
       }
 
-      if (p && telemetry) {
-        const isThrusting = telemetry.stage === 'powered-ascent'
-        const posAttr = p.geometry.getAttribute('position') as THREE.BufferAttribute
-        const vel = particleVelocities.current!
-        const baseX = r ? r.position.x : 0
-        const baseY = r ? r.position.y : 0
-        // Exhaust leaves the nozzle opposite to the body axis (body axis up = (-sin, cos)).
-        const exX = r ? Math.sin(r.rotation.z) : 0
-        const exY = r ? -Math.cos(r.rotation.z) : -1
-        for (let i = 0; i < PARTICLE_COUNT; i++) {
-          const idx = i * 3
-          if (isThrusting && Math.random() < 0.3) {
-            const exSpeed = Math.random() * 0.25 + 0.12
-            posAttr.array[idx] = baseX + (Math.random() - 0.5) * 0.25
-            posAttr.array[idx + 1] = baseY
-            posAttr.array[idx + 2] = (Math.random() - 0.5) * 0.25
-            vel[idx] = exX * exSpeed + (Math.random() - 0.5) * 0.05
-            vel[idx + 1] = exY * exSpeed + (Math.random() - 0.5) * 0.02
-            vel[idx + 2] = (Math.random() - 0.5) * 0.05
-          } else {
-            posAttr.array[idx] += vel[idx]
-            posAttr.array[idx + 1] += vel[idx + 1]
-            posAttr.array[idx + 2] += vel[idx + 2]
-          }
-        }
-        posAttr.needsUpdate = true
-      }
+      if (telemetry && r) {
+        // ---- Liftoff smoke: trail + trench cloud + column ----
+        const sdt = frameDt
+        const alt = telemetry.altitude
+        // Wind (m/s along +X) -> scene units/s; old smoke drifts downwind.
+        smoke.setWind(metresToScene(telemetry.windSpeed), 0)
+        // Air density (1 at sea level): thick trail low, thin trail high.
+        const rho = THREE.MathUtils.clamp(telemetry.airDensity / 1.225, 0, 1)
+        smoke.setDensity(1)
 
-      if (gc && telemetry) {
-        const posAttr = gc.geometry.getAttribute('position') as THREE.BufferAttribute
-        const vel = groundCloudVel.current!
-        const age = groundCloudAge.current!
-        const spawning = telemetry.stage === 'powered-ascent' && telemetry.time < GROUND_CLOUD_WINDOW
-        const dt = 1 / 60
-        for (let i = 0; i < GROUND_CLOUD_COUNT; i++) {
-          const idx = i * 3
-          if (spawning && Math.random() < 0.15) {
-            const angle = Math.random() * Math.PI * 2
-            const radius = Math.random() * 1.2
-            posAttr.array[idx] = Math.cos(angle) * radius
-            posAttr.array[idx + 1] = -0.3
-            posAttr.array[idx + 2] = Math.sin(angle) * radius
-            const outSpeed = 0.03 + Math.random() * 0.05
-            vel[idx] = Math.cos(angle) * outSpeed
-            vel[idx + 1] = 0.01 + Math.random() * 0.015
-            vel[idx + 2] = Math.sin(angle) * outSpeed
-            age[i] = 0
-          } else if (age[i] < 4) {
-            posAttr.array[idx] += vel[idx]
-            posAttr.array[idx + 1] += vel[idx + 1]
-            posAttr.array[idx + 2] += vel[idx + 2]
-            vel[idx] *= 0.98; vel[idx + 2] *= 0.98; age[i] += dt
-          } else if (posAttr.array[idx + 1] !== -100) {
-            posAttr.array[idx + 1] = -100
+        const burning = !!plume && plume.visible
+        if (burning && plume) {
+          plume.getWorldQuaternion(smokeQuat)
+          smokeDir.set(0, -1, 0).applyQuaternion(smokeQuat)
+          plume.getWorldPosition(smokeExit)
+          smokeTail.copy(smokeExit).addScaledVector(smokeDir, plumeLenWorld * 0.6)
+
+          // Engine light on the smoke near the nozzle (plus the ignition flash).
+          smoke.setGlow(plumeThrottle * 0.7 + ignitionLight.intensity * 0.15, smokeExit, rocketHeight * 1.6)
+
+          // -- Trail: spawned along the path the plume tail moved this frame.
+          //    Scales with throttle and air density, stops above ~12 km
+          //    (the plume itself keeps burning).
+          const trailCut = 1 - THREE.MathUtils.smoothstep(alt, SMOKE_TRAIL.fadeStartM, SMOKE_TRAIL.stopM)
+          const trailEmit = plumeThrottle * (0.25 + 0.75 * rho) * trailCut
+          if (!smokePrevValid || smokePrev.distanceToSquared(smokeTail) > 2500) smokePrev.copy(smokeTail)
+          trailSpawnAcc += SMOKE_TRAIL.rate * smokeQ * trailEmit * sdt
+          const n = Math.min(Math.floor(trailSpawnAcc), 200)
+          trailSpawnAcc = n === 200 ? 0 : trailSpawnAcc - n
+          const spread = nozzleExitR * rocketScale * 2
+          const thin = 1 - rho                          // thinner air -> wider, fainter puffs
+          const tS0 = metresToScene(SMOKE_TRAIL.size0M) * (1 + 1.5 * thin)
+          const tS1 = metresToScene(SMOKE_TRAIL.size1M) * (1 + 1.2 * thin)
+          for (let k = 0; k < n; k++) {
+            smokeLerp.lerpVectors(smokePrev, smokeTail, (k + 1) / n)
+            const sv = metresToScene(20 + Math.random() * 50)     // along the exhaust
+            const jit = metresToScene(25)
+            smoke.emit(POOL_TRAIL,
+              smokeLerp.x + (Math.random() - 0.5) * spread,
+              smokeLerp.y + (Math.random() - 0.5) * spread,
+              smokeLerp.z + (Math.random() - 0.5) * spread,
+              smokeDir.x * sv + (Math.random() - 0.5) * jit,
+              smokeDir.y * sv + (Math.random() - 0.5) * jit,
+              smokeDir.z * sv + (Math.random() - 0.5) * jit,
+              tS0, tS1, 0.06,
+            )
           }
+          smokePrev.copy(smokeTail)
+          smokePrevValid = true
+
+          // -- Pad clouds: strongest while the plume is still hitting the
+          //    pad, fading out as the nozzle climbs above padHeightM.
+          const padStrength = Math.pow(THREE.MathUtils.clamp(1 - smokeExit.y / metresToScene(SMOKE_PAD_HEIGHT_M), 0, 1), 1.5)
+          const padEmit = padStrength * plumeThrottle
+          // Trench: blasted sideways out of the flame trench (along X), fast
+          // at first, then slowing, rising and swelling.
+          trenchSpawnAcc += SMOKE_TRENCH.rate * smokeQ * padEmit * sdt
+          const m = Math.min(Math.floor(trenchSpawnAcc), 150)
+          trenchSpawnAcc = m === 150 ? 0 : trenchSpawnAcc - m
+          const trS0 = metresToScene(SMOKE_TRENCH.size0M), trS1 = metresToScene(SMOKE_TRENCH.size1M)
+          for (let k = 0; k < m; k++) {
+            const side = Math.random() < 0.5 ? -1 : 1
+            const sp = metresToScene(SMOKE_TRENCH.speedMinMps + Math.random() * (SMOKE_TRENCH.speedMaxMps - SMOKE_TRENCH.speedMinMps))
+            smoke.emit(POOL_TRENCH,
+              side * (PAD_RADIUS * 0.7 + Math.random() * PAD_RADIUS * 0.5), 0.25 + Math.random() * 0.5, (Math.random() - 0.5) * PAD_RADIUS * 0.7,
+              side * sp, sp * (0.05 + Math.random() * 0.15), (Math.random() - 0.5) * sp * 0.35,
+              trS0, trS1, 0.05,
+            )
+          }
+          // Column: billowing straight up around the pad (exhaust deflected
+          // up + deluge steam).
+          columnSpawnAcc += SMOKE_COLUMN.rate * smokeQ * padEmit * sdt
+          const c = Math.min(Math.floor(columnSpawnAcc), 100)
+          columnSpawnAcc = c === 100 ? 0 : columnSpawnAcc - c
+          const cS0 = metresToScene(SMOKE_COLUMN.size0M), cS1 = metresToScene(SMOKE_COLUMN.size1M)
+          for (let k = 0; k < c; k++) {
+            const ang = Math.random() * Math.PI * 2
+            const rad = PAD_RADIUS * (0.4 + Math.random() * 0.6)
+            const out = metresToScene(15 + Math.random() * 45)
+            const up = metresToScene(40 + Math.random() * 80)
+            smoke.emit(POOL_COLUMN,
+              Math.cos(ang) * rad, 0.3 + Math.random() * 0.6, Math.sin(ang) * rad,
+              Math.cos(ang) * out, up, Math.sin(ang) * out,
+              cS0, cS1, 0.035,
+            )
+          }
+        } else {
+          smokePrevValid = false
+          smoke.setGlow(0, smokeExit, 1)
         }
-        posAttr.needsUpdate = true
+        smoke.update(sdt)
       }
 
       composer.render()
@@ -1282,6 +1481,7 @@ export function Scene({ telemetryRef, launched, vehicleId, selecting, quality = 
       camera.aspect = w / h; camera.updateProjectionMatrix()
       renderer.setSize(w, h, true); composer.setSize(w, h)
       heatUniforms.aspect.value = w / h
+      smoke.setPxPerUnit(smokePxPerUnit(h))
     }
     let resizeObserver: ResizeObserver | null = null
     if (typeof ResizeObserver !== 'undefined') {
@@ -1295,6 +1495,8 @@ export function Scene({ telemetryRef, launched, vehicleId, selecting, quality = 
       if (resizeObserver) { resizeObserver.disconnect() } else { window.removeEventListener('resize', handleResize) }
       cloudPassRef.current?.dispose()
       groundResultRef.current?.dispose()
+      smoke.dispose()
+      padRig.dispose()
       heatPass.dispose()
       chromaPass.dispose()
       envRenderTarget.dispose()
@@ -1319,7 +1521,6 @@ export function Scene({ telemetryRef, launched, vehicleId, selecting, quality = 
       rocketRef.current.rotation.z = 0
     }
     if (!launched) {
-      if (groundCloudAge.current) groundCloudAge.current.fill(999)
       if (plumeRef.current) plumeRef.current.visible = false
       if (trenchLeftRef.current) trenchLeftRef.current.visible = false
       if (trenchRightRef.current) trenchRightRef.current.visible = false
@@ -1331,6 +1532,12 @@ export function Scene({ telemetryRef, launched, vehicleId, selecting, quality = 
       if (nozzleGroupRef.current) nozzleGroupRef.current.rotation.z = 0
       if (starMatRef.current) starMatRef.current.opacity = 0
       if (chuteRef.current) chuteRef.current.visible = false
+      for (const line of chuteLinesRef.current) line.visible = false
+      chuteScaleRef.current = 0
+      const rig = chuteRigRef.current
+      rig.active = false; rig.deployT = 0; rig.hang = 0; rig.phiVel = 0
+      smokeResetRef.current?.()
+      launchPadRef.current?.reset()
     }
   }, [launched])
 
