@@ -11,6 +11,9 @@ import { buildGround, type GroundResult } from './buildGround'
 import { buildSun } from './buildSun'
 import { SmokeParticles } from './SmokeParticles'
 import { buildLaunchPad, PAD_RELEASE, type LaunchPadRig } from './buildLaunchPad'
+import { buildLaunchComplex } from './buildLaunchComplex'
+import { PAD_RADIUS, padShapes } from './padFootprint'
+import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js'
 import { metresToScene } from '../constants/scale'
 import { launchSite, launchSiteToRender } from '../constants/frames'
 import type { Telemetry, VehicleId, QualityTier } from '../types'
@@ -28,12 +31,22 @@ const SMOKE_QUALITY: Record<QualityTier, number> = { low: 0.45, medium: 0.7, hig
 const POOL_TRAIL = 0
 const POOL_TRENCH = 1
 const POOL_COLUMN = 2
+const POOL_STEAM = 3
 // count = pool size at 'high'; rate = particles/s at full strength; life = s
 const SMOKE_TRAIL = { count: 2800, rate: 600, life: 7, size0M: 9, size1M: 85, fadeStartM: 10000, stopM: 12000 }
 const SMOKE_TRENCH = { count: 1700, rate: 380, life: 10, size0M: 20, size1M: 190, speedMinMps: 140, speedMaxMps: 330 }
 const SMOKE_COLUMN = { count: 1000, rate: 170, life: 9, size0M: 24, size1M: 220 }
+// Deluge steam from the pad nozzles during the first seconds of ignition.
+const SMOKE_STEAM = { count: 500, rate: 260, life: 5, size0M: 6, size1M: 70, durationS: 7 }
+const SMOKE_OPACITY = 0.4          // overall smoke opacity (was 0.55)
+const SMOKE_NEAR_FADE: [number, number] = [0.6, 3.0]   // view depth: smoke fades out this close to the lens
+// ---- Engine light (warm rim/under-light on the rocket in the smoke) ----
+const ENGINE_LIGHT_INTENSITY = 6
+const ENGINE_LIGHT_RANGE = 3       // x rocketHeight
+// ---- Launch camera: fixed tripod shot, then blend into the chase cam ----
+const CAM_HOLD_S = 3
+const CAM_BLEND_S = 1.5
 const SMOKE_PAD_HEIGHT_M = 320     // pad clouds stop once the nozzle is this high
-const PAD_RADIUS = 2.2             // launch pad radius, scene units (the pad mesh below)
 const LIFTOFF_ALT_M = 0.05         // physics liftedOff threshold (rocketPhysics.ts)
 // ---- Ignition camera shake / hold-down vibration ----
 const SHAKE_S = 4                  // seconds of shake after ignition
@@ -436,6 +449,11 @@ export function Scene({ telemetryRef, launched, vehicleId, selecting, quality = 
     fill.position.set(-6, 4, -4)
     scene.add(fill)
 
+    // Warm light at the nozzle while the engine burns, so the rocket stays
+    // lit and readable inside its own smoke. Always present (intensity 0
+    // when off) so the light count -- part of every program key -- never changes.
+    const engineLight = new THREE.PointLight(0xffa458, 0, 10, 2)
+    scene.add(engineLight)
     const ignitionLight = new THREE.PointLight(0xff6600, 0, 8)
     ignitionLight.position.set(0, 0.5, 0)
     scene.add(ignitionLight)
@@ -493,7 +511,7 @@ export function Scene({ telemetryRef, launched, vehicleId, selecting, quality = 
       }
     }
     const padTexture = new THREE.CanvasTexture(padCanvas)
-    padTexture.wrapS = THREE.RepeatWrapping; padTexture.wrapT = THREE.RepeatWrapping; padTexture.repeat.set(3, 3)
+    padTexture.wrapS = THREE.RepeatWrapping; padTexture.wrapT = THREE.RepeatWrapping; padTexture.repeat.set(3 / (2 * PAD_RADIUS), 3 / (2 * PAD_RADIUS))
 
     const padRoughCanvas = document.createElement('canvas')
     padRoughCanvas.width = 256; padRoughCanvas.height = 256
@@ -511,15 +529,19 @@ export function Scene({ telemetryRef, launched, vehicleId, selecting, quality = 
       padRCtx.beginPath(); padRCtx.moveTo(0, i * padCell); padRCtx.lineTo(256, i * padCell); padRCtx.stroke()
     }
     const padRoughTexture = new THREE.CanvasTexture(padRoughCanvas)
-    padRoughTexture.wrapS = THREE.RepeatWrapping; padRoughTexture.wrapT = THREE.RepeatWrapping; padRoughTexture.repeat.set(3, 3)
+    padRoughTexture.wrapS = THREE.RepeatWrapping; padRoughTexture.wrapT = THREE.RepeatWrapping; padRoughTexture.repeat.set(3 / (2 * PAD_RADIUS), 3 / (2 * PAD_RADIUS))
 
-    const padGeo = new THREE.CylinderGeometry(PAD_RADIUS, PAD_RADIUS, 0.16, 24)
+    // Pad disc minus the flame-trench band (padFootprint.ts): the pit and
+    // launch mount live in buildLaunchPad.ts, the ground is cut to match.
+    const padGeo = new THREE.ExtrudeGeometry(padShapes(), { depth: 0.16, bevelEnabled: false, curveSegments: 24 })
+    padGeo.rotateX(-Math.PI / 2)
     const padMat = new THREE.MeshStandardMaterial({
       color: 0xffffff, map: padTexture,
       roughnessMap: padRoughTexture, roughness: 0.8, metalness: 0.3
     })
     const pad = new THREE.Mesh(padGeo, padMat)
-    pad.position.y = -0.08; pad.castShadow = true; pad.receiveShadow = true; scene.add(pad)
+    // Top sits 0.01 above the ground surface so the ground can't z-fight through it.
+    pad.position.y = -0.15; pad.castShadow = true; pad.receiveShadow = true; scene.add(pad)
 
     // ---- Pad structure ----
     function addStrut(
@@ -539,30 +561,22 @@ export function Scene({ telemetryRef, launched, vehicleId, selecting, quality = 
     }
 
     const structMat = new THREE.MeshStandardMaterial({ color: 0x3a3a3e, roughness: 0.55, metalness: 0.75 })
-    const deflectorMat = new THREE.MeshStandardMaterial({ color: 0x1c1c1e, roughness: 0.7, metalness: 0.6 })
 
-    const padRimGeo = new THREE.TorusGeometry(PAD_RADIUS, 0.05, 8, 32)
+    // Rim: two arcs, broken where the trench cuts through the pad.
+    const rimGap = Math.asin(Math.min(PAD_RADIUS * 0.2 / PAD_RADIUS + 0.02, 0.99))
+    const rimArcs = [0, Math.PI].map((a0) => {
+      const g = new THREE.TorusGeometry(PAD_RADIUS, 0.05, 8, 24, Math.PI - 2 * rimGap)
+      g.rotateZ(a0 + rimGap)
+      g.rotateX(Math.PI / 2)
+      return g.toNonIndexed()
+    })
+    const padRimGeo = mergeGeometries(rimArcs)!
     const padRim = new THREE.Mesh(padRimGeo, structMat)
-    padRim.rotation.x = Math.PI / 2
     padRim.castShadow = true
     scene.add(padRim)
 
-    const LEG_COUNT = 6
-    for (let i = 0; i < LEG_COUNT; i++) {
-      const angle = (i / LEG_COUNT) * Math.PI * 2
-      const top = new THREE.Vector3(Math.cos(angle) * 1.75, -0.15, Math.sin(angle) * 1.75)
-      const bottom = new THREE.Vector3(Math.cos(angle) * 1.95, -0.5, Math.sin(angle) * 1.95)
-      addStrut(top, bottom, 0.05, 0.07, structMat)
-    }
-
-    const deflector = new THREE.Mesh(
-      new THREE.ConeGeometry(0.55, 0.3, 4, 1, true),
-      deflectorMat
-    )
-    deflector.rotation.y = Math.PI / 4
-    deflector.position.y = -0.42
-    deflector.castShadow = true
-    scene.add(deflector)
+    // (Buried pad legs + cone deflector removed: the open flame-trench pit,
+    // launch mount and wedge deflector are built in buildLaunchPad.ts.)
 
     for (const angle of [Math.PI / 2, -Math.PI / 2]) {
       const outer = new THREE.Vector3(Math.cos(angle) * 2.15, 0.05, Math.sin(angle) * 2.15)
@@ -572,9 +586,13 @@ export function Scene({ telemetryRef, launched, vehicleId, selecting, quality = 
 
     // Launch tower, swing arms, umbilicals and hold-down clamps (replaces
     // the old single tower box). Fitted per vehicle in swapVehicle().
-    const padRig = buildLaunchPad(PAD_RADIUS)
+    const padRig = buildLaunchPad()
     scene.add(padRig.group)
     launchPadRef.current = padRig
+
+    // Static launch-center backdrop (VAB, blockhouse, fuel farm, ...).
+    const complex = buildLaunchComplex(qualityRef.current)
+    scene.add(complex.group)
 
     // ---- Flame trench ----
     const trenchGeo = new THREE.CylinderGeometry(0, 1, 0.2, 24, 1, false)
@@ -760,7 +778,7 @@ export function Scene({ telemetryRef, launched, vehicleId, selecting, quality = 
       rocketRef.current = rocket
       nozzleGroupRef.current = model.nozzleGroup
       rocketHeight = model.height
-      padRig.fit(rocket, rocketHeight)
+      padRig.fit(rocket, rocketHeight, q)
       padRig.reset()
       const bb = new THREE.Box3().setFromObject(rocket)
       rocketRadius = Math.max(Math.abs(bb.min.x), bb.max.x, 0.3)
@@ -871,7 +889,9 @@ export function Scene({ telemetryRef, launched, vehicleId, selecting, quality = 
       { count: Math.round(SMOKE_TRAIL.count * smokeQ), life: SMOKE_TRAIL.life, drag: 0.9, buoyancy: 0.15, turbulence: 0.8, groundY: 0.1 },
       { count: Math.round(SMOKE_TRENCH.count * smokeQ), life: SMOKE_TRENCH.life, drag: 0.6, buoyancy: 0.3, turbulence: 1.2, groundY: 0.2 },
       { count: Math.round(SMOKE_COLUMN.count * smokeQ), life: SMOKE_COLUMN.life, drag: 0.7, buoyancy: 0.55, turbulence: 1.0, groundY: 0.2 },
-    ], { opacity: 0.55, smokeColor: 0xf4f1ec, shadowColor: 0x77716b })
+      { count: Math.round(SMOKE_STEAM.count * smokeQ), life: SMOKE_STEAM.life, drag: 1.2, buoyancy: 0.6, turbulence: 1.5, groundY: 0.1 },
+    ], { opacity: SMOKE_OPACITY, smokeColor: 0xedf0f3, shadowColor: 0x6a6f78 })   // cool grey-white; warm comes from the engine glow
+    smoke.setNearFade(SMOKE_NEAR_FADE[0], SMOKE_NEAR_FADE[1])
     smoke.points.renderOrder = 5     // after opaque + trench fans; the plume (999) still draws on top
     scene.add(smoke.points)
     smokeResetRef.current = () => smoke.reset()
@@ -892,6 +912,14 @@ export function Scene({ telemetryRef, launched, vehicleId, selecting, quality = 
     const smokeLerp = new THREE.Vector3()
     // Release sequence: sim time of physics liftoff (altitude first > 0.05 m).
     let firstRiseT = -1
+    let steamSpawnAcc = 0
+    let steamNozzle = 0
+    // Launch camera hold (tripod position captured on the first flight frame).
+    let camHoldValid = false
+    const camHold = new THREE.Vector3()
+    const camChase = new THREE.Vector3()
+    const axisBase = new THREE.Vector3()
+    const axisNose = new THREE.Vector3()
 
     // ---- Post-processing ----
     // The scene is rendered into a target that keeps a depth texture, which
@@ -1032,6 +1060,7 @@ export function Scene({ telemetryRef, launched, vehicleId, selecting, quality = 
       const frameMs = nowT - lastFrameT
       lastFrameT = nowT
       const frameDt = Math.min(Math.max(frameMs / 1000, 0), 0.1)
+      padRig.blink(elapsed)
       // Adaptive quality: if the average frame is slower than ~30 fps while
       // sitting on the pad, step the vehicle detail down one tier.
       if (frameMs < 250) { frameAcc += frameMs; frameN++ }
@@ -1055,6 +1084,9 @@ export function Scene({ telemetryRef, launched, vehicleId, selecting, quality = 
         smokePrevValid = false
         plumeThrottle = 0
         firstRiseT = -1
+        camHoldValid = false
+        engineLight.intensity = 0
+        smoke.setRocketAxis(null)
       }
 
       if (r && !telemetry) {
@@ -1237,11 +1269,17 @@ export function Scene({ telemetryRef, launched, vehicleId, selecting, quality = 
         // ---- Dynamic chase camera ----
         // Follow the CG; pull back with altitude to reveal the globe.
         updateChaseScale(metresToScene(telemetry.altitude))
-        camera.position.set(
+        camChase.set(
           cgX + chaseOffset.x,
           cgY + chaseOffset.y,
           cgPosRender[2] + chaseOffset.z
         )
+        // Launch shot: hold a fixed tripod position for the first seconds
+        // (rocket framed and centred as it clears the tower), then ease
+        // into the chase camera. Always looks at the CG.
+        if (!camHoldValid) { camHold.copy(camChase); camHoldValid = true }
+        const camBlend = THREE.MathUtils.smoothstep(telemetry.time, CAM_HOLD_S, CAM_HOLD_S + CAM_BLEND_S)
+        camera.position.lerpVectors(camHold, camChase, camBlend)
         camera.lookAt(cgX, cgY, cgPosRender[2])
         // Ignition / liftoff shake: small, decaying, a few pixels.
         if (telemetry.stage === 'powered-ascent' && telemetry.time < SHAKE_S) {
@@ -1393,6 +1431,31 @@ export function Scene({ telemetryRef, launched, vehicleId, selecting, quality = 
           plume.getWorldPosition(smokeExit)
           smokeTail.copy(smokeExit).addScaledVector(smokeDir, plumeLenWorld * 0.6)
 
+          // Engine light on the rocket (real PointLight) and on the smoke near
+          // the nozzle (shader glow), plus the ignition flash.
+          engineLight.position.copy(smokeExit).addScaledVector(smokeDir, rocketHeight * 0.15)
+          engineLight.distance = rocketHeight * ENGINE_LIGHT_RANGE
+          engineLight.intensity = ENGINE_LIGHT_INTENSITY * plumeThrottle * (0.9 + 0.1 * Math.sin(elapsed * 41.0))
+
+          // Deluge steam bursts from the pad nozzles during the first seconds.
+          if (telemetry.time < SMOKE_STEAM.durationS && padRig.steamNozzles.length > 0) {
+            const fade = 1 - telemetry.time / SMOKE_STEAM.durationS
+            steamSpawnAcc += SMOKE_STEAM.rate * smokeQ * fade * sdt
+            const ns = Math.min(Math.floor(steamSpawnAcc), 80)
+            steamSpawnAcc = ns === 80 ? 0 : steamSpawnAcc - ns
+            const s0 = metresToScene(SMOKE_STEAM.size0M), s1 = metresToScene(SMOKE_STEAM.size1M)
+            for (let k = 0; k < ns; k++) {
+              const nz = padRig.steamNozzles[steamNozzle]
+              steamNozzle = (steamNozzle + 1) % padRig.steamNozzles.length
+              const out = metresToScene(8 + Math.random() * 25)
+              smoke.emit(POOL_STEAM,
+                nz.x + (Math.random() - 0.5) * 0.15, nz.y + 0.05, nz.z + (Math.random() - 0.5) * 0.15,
+                nz.dx * out + (Math.random() - 0.5) * 0.4, metresToScene(25 + Math.random() * 45), nz.dz * out + (Math.random() - 0.5) * 0.4,
+                s0, s1, 0,
+              )
+            }
+          }
+
           // Engine light on the smoke near the nozzle (plus the ignition flash).
           smoke.setGlow(plumeThrottle * 0.7 + ignitionLight.intensity * 0.15, smokeExit, rocketHeight * 1.6)
 
@@ -1441,7 +1504,7 @@ export function Scene({ telemetryRef, launched, vehicleId, selecting, quality = 
             const sp = metresToScene(SMOKE_TRENCH.speedMinMps + Math.random() * (SMOKE_TRENCH.speedMaxMps - SMOKE_TRENCH.speedMinMps))
             smoke.emit(POOL_TRENCH,
               side * (PAD_RADIUS * 0.7 + Math.random() * PAD_RADIUS * 0.5), 0.25 + Math.random() * 0.5, (Math.random() - 0.5) * PAD_RADIUS * 0.7,
-              side * sp, sp * (0.05 + Math.random() * 0.15), (Math.random() - 0.5) * sp * 0.35,
+              side * sp, sp * (0.05 + Math.random() * 0.15), (Math.random() - 0.8) * sp * 0.35,   // biased to -Z, away from the lens
               trS0, trS1, 0.05,
             )
           }
@@ -1465,7 +1528,12 @@ export function Scene({ telemetryRef, launched, vehicleId, selecting, quality = 
         } else {
           smokePrevValid = false
           smoke.setGlow(0, smokeExit, 1)
+          engineLight.intensity = 0
         }
+        // Keep the rocket readable: smoke thins around its body and in front of it.
+        axisBase.set(0, 0, 0).applyMatrix4(r.matrixWorld)
+        axisNose.set(-Math.sin(r.rotation.z), Math.cos(r.rotation.z), 0).multiplyScalar(rocketHeight).add(axisBase)
+        smoke.setRocketAxis(axisBase, axisNose, rocketRadius * 1.2)
         smoke.update(sdt)
       }
 
@@ -1497,6 +1565,7 @@ export function Scene({ telemetryRef, launched, vehicleId, selecting, quality = 
       groundResultRef.current?.dispose()
       smoke.dispose()
       padRig.dispose()
+      complex.dispose()
       heatPass.dispose()
       chromaPass.dispose()
       envRenderTarget.dispose()

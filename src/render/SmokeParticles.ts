@@ -23,11 +23,18 @@ const VERT = /* glsl */ `
   uniform float uPxPerUnit;
   uniform vec3  uGlowPos;
   uniform float uGlowRadius;
+  // Rocket visibility: body axis (world, base -> nose) and radius.
+  uniform float uAxisOn;
+  uniform vec3  uAxisA;
+  uniform vec3  uAxisB;
+  uniform float uAxisRadius;
+  uniform vec2  uNearFade;        // view depth: fully faded at x, full at y
   varying float vAge;
   varying float vSeed;
   varying float vHot;
   varying float vGlow;
   varying float vSpin;
+  varying float vVis;
 
   void main() {
     vAge = aAge;
@@ -38,7 +45,37 @@ const VERT = /* glsl */ `
     // Puffs swell quickly at first, then keep slowly growing.
     float grow = 1.0 - pow(1.0 - clamp(aAge, 0.0, 1.0), 2.2);
     float size = mix(aSize.x, aSize.y, grow);
-    gl_PointSize = aAge >= 1.0 ? 0.0 : clamp(size * uPxPerUnit / max(-mvPosition.z, 0.001), 0.0, 640.0);
+    float depth = max(-mvPosition.z, 0.001);
+    float px = clamp(size * uPxPerUnit / depth, 0.0, 640.0);
+    gl_PointSize = aAge >= 1.0 ? 0.0 : px;
+
+    // ---- keep the rocket readable through the smoke ----
+    float vis = 1.0;
+    if (uAxisOn > 0.5) {
+      // (1) thin out smoke in a cylinder around the rocket body
+      vec3 ab = uAxisB - uAxisA;
+      float tt = clamp(dot(position - uAxisA, ab) / max(dot(ab, ab), 1e-6), 0.0, 1.0);
+      float dAxis = length(position - (uAxisA + ab * tt));
+      vis *= mix(0.25, 1.0, smoothstep(uAxisRadius, uAxisRadius * 3.0, dAxis));
+      // (2) puffs IN FRONT of the rocket that overlap it on screen fade out
+      //     (angular test in view space, so it works from any camera)
+      vec4 va = viewMatrix * vec4(uAxisA, 1.0);
+      vec4 vb = viewMatrix * vec4(uAxisB, 1.0);
+      vec2 pa = va.xy / max(-va.z, 1e-3);
+      vec2 pb = vb.xy / max(-vb.z, 1e-3);
+      vec2 pp = mvPosition.xy / depth;
+      vec2 sab = pb - pa;
+      float st = clamp(dot(pp - pa, sab) / max(dot(sab, sab), 1e-8), 0.0, 1.0);
+      float dScr = length(pp - (pa + sab * st));
+      float rocketDepth = -mix(va.z, vb.z, st);
+      float rScr = uAxisRadius / max(rocketDepth, 1e-3) + 0.45 * size / depth;
+      float inFront = step(depth, rocketDepth - uAxisRadius);
+      vis *= mix(1.0, mix(0.18, 1.0, smoothstep(rScr * 0.55, rScr * 1.3, dScr)), inFront);
+    }
+    // (3) don't let puffs swallow the lens: fade very close / huge sprites
+    vis *= smoothstep(uNearFade.x, uNearFade.y, depth);
+    vis *= 1.0 - 0.6 * smoothstep(360.0, 640.0, px);
+    vVis = vis;
     // Engine light falling on nearby smoke (world-space distance; the
     // Points object has an identity transform so position is world).
     vec3 dg = position - uGlowPos;
@@ -61,9 +98,10 @@ const FRAG = /* glsl */ `
   varying float vHot;
   varying float vGlow;
   varying float vSpin;
+  varying float vVis;
 
   void main() {
-    if (vAge >= 1.0) discard;
+    if (vAge >= 1.0 || vVis < 0.004) discard;
     // Slowly rotating puff texture (lumpy cauliflower sprite).
     vec2 c = gl_PointCoord - 0.5;
     float cs = cos(vSpin), sn = sin(vSpin);
@@ -85,7 +123,7 @@ const FRAG = /* glsl */ `
 
     float fadeIn = smoothstep(0.0, 0.03, vAge);
     float fadeOut = 1.0 - smoothstep(0.45, 1.0, vAge);
-    float a = puff * fadeIn * fadeOut * uOpacity * uDensity;
+    float a = puff * fadeIn * fadeOut * uOpacity * uDensity * vVis;
     gl_FragColor = vec4(col, clamp(a, 0.0, 1.0));
     #include <logdepthbuf_fragment>
   }
@@ -193,6 +231,11 @@ export class SmokeParticles {
         uGlow: { value: 0 },
         uGlowPos: { value: new THREE.Vector3() },
         uGlowRadius: { value: 1 },
+        uAxisOn: { value: 0 },
+        uAxisA: { value: new THREE.Vector3() },
+        uAxisB: { value: new THREE.Vector3() },
+        uAxisRadius: { value: 1 },
+        uNearFade: { value: new THREE.Vector2(0.5, 2.5) },
         uSmokeColor: { value: new THREE.Color(look.smokeColor) },
         uShadowColor: { value: new THREE.Color(look.shadowColor) },
       },
@@ -215,6 +258,19 @@ export class SmokeParticles {
     u.uGlowPos.value.copy(pos)
     u.uGlowRadius.value = radius
   }
+  /** Rocket body axis (world, base -> nose) + radius; smoke thins around it
+   *  and in front of it on screen. Pass null to disable (no rocket in flight). */
+  setRocketAxis(base: THREE.Vector3 | null, nose?: THREE.Vector3, radius = 1): void {
+    const u = this.material.uniforms
+    u.uAxisOn.value = base ? 1 : 0
+    if (base && nose) {
+      u.uAxisA.value.copy(base)
+      u.uAxisB.value.copy(nose)
+      u.uAxisRadius.value = radius
+    }
+  }
+  /** View-depth range (world units) over which smoke fades in from the lens. */
+  setNearFade(start: number, end: number): void { this.material.uniforms.uNearFade.value.set(start, end) }
   /** Ambient wind, world units / s. Drag relaxes particles toward it, so old smoke drifts downwind. */
   setWind(x: number, z: number): void { this.windX = x; this.windZ = z }
 
