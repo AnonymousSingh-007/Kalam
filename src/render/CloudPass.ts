@@ -352,7 +352,7 @@ export class CloudPass extends Pass {
   private mat: THREE.ShaderMaterial
   private quality: QualityTier
 
-  constructor(private camera: THREE.PerspectiveCamera, scene: THREE.Scene, quality: QualityTier = 'medium') {
+  constructor(private camera: THREE.PerspectiveCamera, _scene: THREE.Scene, quality: QualityTier = 'medium') {
     super()
     this.quality = quality
     this.mat = new THREE.ShaderMaterial({

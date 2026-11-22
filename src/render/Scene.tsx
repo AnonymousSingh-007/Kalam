@@ -33,7 +33,15 @@ const STAR_FADE_START = 5000
 const STAR_FADE_FULL = 15000
 const STAR_MAX_OPACITY = 0.9
 
+// The renderer uses logarithmicDepthBuffer (needed for the 0.1 .. 800 000
+// near/far range of the true-scale planet). Every built-in material writes
+// log depth via gl_FragDepth; a custom ShaderMaterial must include the
+// logdepthbuf chunks itself, or its fragments are depth-tested with plain
+// perspective depth (~0.99) against the log-depth buffer (~0.2 for nearby
+// geometry) and get rejected wherever any opaque surface is behind them.
 const PLUME_VERTEX = `
+  #include <common>
+  #include <logdepthbuf_pars_vertex>
   uniform float expansionFactor;
   uniform float time;
   uniform float plumeLen;
@@ -60,10 +68,12 @@ const PLUME_VERTEX = `
     vec3 viewDir = normalize(-mvPosition.xyz);
     vFresnel = 1.0 - abs(dot(viewDir, transformedNormal));
     gl_Position = projectionMatrix * mvPosition;
+    #include <logdepthbuf_vertex>
   }
 `
 
 const PLUME_FRAGMENT = `
+  #include <logdepthbuf_pars_fragment>
   uniform float expansionFactor;
   varying float vY;
   varying float vRadius;
@@ -88,10 +98,13 @@ const PLUME_FRAGMENT = `
     opacity *= mix(0.55, 1.0, edgeFade);
     opacity = clamp(opacity, 0.0, 1.0);
     gl_FragColor = vec4(color, opacity);
+    #include <logdepthbuf_fragment>
   }
 `
 
 const TRENCH_VERTEX = `
+  #include <common>
+  #include <logdepthbuf_pars_vertex>
   uniform float progress;
   uniform float side;
   varying float vDist;
@@ -102,10 +115,12 @@ const TRENCH_VERTEX = `
     pos.y = pos.y * 0.4;
     vDist = length(pos.xz);
     gl_Position = projectionMatrix * modelViewMatrix * vec4(pos, 1.0);
+    #include <logdepthbuf_vertex>
   }
 `
 
 const TRENCH_FRAGMENT = `
+  #include <logdepthbuf_pars_fragment>
   uniform float progress;
   varying float vDist;
 
@@ -116,6 +131,7 @@ const TRENCH_FRAGMENT = `
     vec3 color = mix(coolColor, hotColor, heat);
     float opacity = heat * (1.0 - progress * 0.85) * 0.9;
     gl_FragColor = vec4(color, clamp(opacity, 0.0, 1.0));
+    #include <logdepthbuf_fragment>
   }
 `
 
@@ -862,7 +878,11 @@ export function Scene({ telemetryRef, launched, vehicleId, selecting, quality = 
 
     // ---- Render loop ----
     function animate() {
-      const telemetry = telemetryRef.current
+      // App keeps the last flight's snapshot in telemetryRef (and keeps
+      // stepping that engine) after "Fly again" sets launched=false, so
+      // reading it unconditionally would keep the camera and rocket stuck
+      // on the finished flight and undo the [launched] reset effect below.
+      const telemetry = launchedRef.current ? telemetryRef.current : null
       const r = rocketRef.current
       const ng = nozzleGroupRef.current
       const p = particlesRef.current
