@@ -1,5 +1,6 @@
 import * as THREE from 'three'
 import { ALTITUDE_SCALE, PLANET_RADIUS } from '../constants/scale'
+import { PIT_HALF_X, PIT_HALF_Z, padPitHolePath, flatShapeGeometry } from './padFootprint'
 
 // ╔═══════════════════════════════════════════════════════════════════════╗
 // ║  TRUE-SCALE PLANET                                                   ║
@@ -150,7 +151,9 @@ function makeUniforms() {
     uSea:       { value: SEA_LEVEL },
     uPadRadius: { value: PAD_LAND_RADIUS },
     uPadBoost:  { value: PAD_LAND_BOOST },
-    uSeed:      { value: WORLD_SEED.clone() }
+    uSeed:      { value: WORLD_SEED.clone() },
+    // Flame-trench pit cut-out (world XZ half-extents around the pad).
+    uPit:       { value: new THREE.Vector2(PIT_HALF_X, PIT_HALF_Z) }
   }
 }
 
@@ -203,13 +206,13 @@ export function buildGround(): GroundResult {
   globeMat.onBeforeCompile = (shader) => {
     Object.assign(shader.uniforms, uniforms)
     shader.vertexShader = shader.vertexShader
-      .replace('#include <common>', '#include <common>\nvarying vec3 vSphereNormal;')
-      .replace('#include <begin_vertex>', '#include <begin_vertex>\nvSphereNormal = normalize(position);')
+      .replace('#include <common>', '#include <common>\nvarying vec3 vSphereNormal;\nvarying vec2 vPitXZ;')
+      .replace('#include <begin_vertex>', '#include <begin_vertex>\nvSphereNormal = normalize(position);\nvPitXZ = (modelMatrix * vec4(position, 1.0)).xz;')
     shader.fragmentShader = shader.fragmentShader
       .replace('#include <common>',
-        `#include <common>\nvarying vec3 vSphereNormal;\n${NOISE_GLSL}\n${PLANET_COLOR_GLSL}`)
+        `#include <common>\nvarying vec3 vSphereNormal;\nvarying vec2 vPitXZ;\nuniform vec2 uPit;\n${NOISE_GLSL}\n${PLANET_COLOR_GLSL}`)
       .replace('#include <color_fragment>',
-        '#include <color_fragment>\n  diffuseColor.rgb = planetColor(vSphereNormal);')
+        '#include <color_fragment>\n  if (abs(vPitXZ.x) < uPit.x && abs(vPitXZ.y) < uPit.y) discard;   // flame-trench pit\n  diffuseColor.rgb = planetColor(vSphereNormal);')
       .replace('#include <roughnessmap_fragment>',
         '#include <roughnessmap_fragment>\n  roughnessFactor = mix(0.95, 0.32, gOcean);')
   }
@@ -279,7 +282,8 @@ uniform vec3 uPlanetCenter;
 uniform float uPlanetRadius;
 uniform float uPatchRadius;
 varying vec3 vSphereNormal;
-varying float vEdgeFade;`)
+varying float vEdgeFade;
+varying vec2 vPitXZ;`)
       .replace('#include <begin_vertex>',
         `#include <begin_vertex>
 // Project flat grid vertex onto the planet sphere surface, offset
@@ -291,6 +295,7 @@ vec3 toCenter = worldFlat - uPlanetCenter;
 vec3 dir = normalize(toCenter);
 transformed = (inverse(modelMatrix) * vec4(uPlanetCenter + dir * uPlanetRadius, 1.0)).xyz;
 vSphereNormal = dir;
+vPitXZ = worldFlat.xz;
 float r = length(worldFlat.xz);
 vEdgeFade = 1.0 - smoothstep(uPatchRadius * 0.7, uPatchRadius, r);`)
 
@@ -299,11 +304,14 @@ vEdgeFade = 1.0 - smoothstep(uPatchRadius * 0.7, uPatchRadius, r);`)
         `#include <common>
 varying vec3 vSphereNormal;
 varying float vEdgeFade;
+varying vec2 vPitXZ;
+uniform vec2 uPit;
 uniform float uPatchOpacity;
 ${NOISE_GLSL}
 ${PLANET_COLOR_GLSL}`)
       .replace('#include <color_fragment>',
         `#include <color_fragment>
+if (abs(vPitXZ.x) < uPit.x && abs(vPitXZ.y) < uPit.y) discard;   // flame-trench pit
 diffuseColor.rgb = planetColor(vSphereNormal);
 diffuseColor.a = uPatchOpacity * vEdgeFade;`)
       .replace('#include <roughnessmap_fragment>',
@@ -330,11 +338,15 @@ diffuseColor.a = uPatchOpacity * vEdgeFade;`)
   grad.addColorStop(1, 'rgba(80,60,30,0)')
   sctx.fillStyle = grad; sctx.fillRect(0, 0, 256, 256)
   const scorchTexture = new THREE.CanvasTexture(scorchCanvas)
+  // Disc with the pad + flame-trench pit cut out, so the decal doesn't
+  // draw a dark film over the open pit.
+  const scorchShape = new THREE.Shape().absarc(0, 0, 5, 0, Math.PI * 2, false)
+  scorchShape.holes.push(padPitHolePath())
+  const scorchGeo = flatShapeGeometry(scorchShape, 1 / 10)
   const scorch = new THREE.Mesh(
-    new THREE.CircleGeometry(5, 32),
+    scorchGeo,
     new THREE.MeshBasicMaterial({ map: scorchTexture, transparent: true, depthWrite: false })
   )
-  scorch.rotation.x = -Math.PI / 2
   scorch.position.y = 0.02
   scorch.renderOrder = 2
   group.add(scorch)
@@ -413,7 +425,7 @@ diffuseColor.a = uPatchOpacity * vEdgeFade;`)
   function dispose() {
     globeGeo.dispose(); globeMat.dispose()
     nearGeo.dispose(); nearMat.dispose()
-    scorchTexture.dispose()
+    scorchTexture.dispose(); scorchGeo.dispose()
     atmoGeo.dispose(); atmoMat.dispose()
     group.clear()
   }
