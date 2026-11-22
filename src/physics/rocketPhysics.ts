@@ -1,4 +1,4 @@
-/**
+﻿/**
  * rocketPhysics.ts — full 6-DOF rigid-body rocket flight simulator.
  *
  * State (13 scalars): px,py,pz (position) | vx,vy,vz (velocity) |
@@ -130,7 +130,7 @@ const round = (v: number, d = 2) => {
 // (frames.ts has no three.js/DOM dependency, so this doesn't compromise
 // this module's deliberately headless design — same reasoning as the
 // EARTH_RADIUS_M import above).
-const PLANET_CENTER: Vec3 = [...PLANET_CENTER_IN_LAUNCH_SITE_FRAME]
+const PLANET_CENTER: Vec3 = [...PLANET_CENTER_IN_LAUNCH_SITE_FRAME] as unknown as Vec3
 
 function gravityVector3(p: Vec3): { g: Vec3; mag: number; r: number } {
   const d = V3.sub(p, PLANET_CENTER)
@@ -493,7 +493,6 @@ export class RocketPhysicsEngine {
   private gimbalPitch = 0
   private gimbalYaw = 0
   private gimbalCmd = 0           // pitch command, deg telemetry compat
-  private gimbalYawCmd = 0
   private finPitch = 0
   private finYaw = 0
   private tauRcs: Vec3 = [0, 0, 0]
@@ -526,8 +525,6 @@ export class RocketPhysicsEngine {
   private attHoldYaw = 0          // rad, nose-right(+X)-positive, matches pitch convention
   private attHoldRoll = 0         // rad, standard right-hand about +Y_body
   private omegaCmdPitch = 0
-  private omegaCmdYaw = 0
-  private omegaCmdRoll = 0
 
   // flight bookkeeping
   private stage: FlightStage = 'pre-launch'
@@ -598,7 +595,6 @@ export class RocketPhysicsEngine {
     this.gimbalPitch = 0
     this.gimbalYaw = 0
     this.gimbalCmd = 0
-    this.gimbalYawCmd = 0
     this.finPitch = 0
     this.finYaw = 0
     this.tauRcs = [0, 0, 0]
@@ -617,8 +613,6 @@ export class RocketPhysicsEngine {
     this.attHoldYaw = 0
     this.attHoldRoll = 0
     this.omegaCmdPitch = 0
-    this.omegaCmdYaw = 0
-    this.omegaCmdRoll = 0
     this.stage = 'pre-launch'
     this.maxAltitude = 0
     this.maxQ = 0
@@ -1149,7 +1143,6 @@ export class RocketPhysicsEngine {
         } else {
           omCmdYaw = clamp(K_THETA * wrapPi(this.attHoldYaw - thYaw), -OMEGA_MAX, OMEGA_MAX)
         }
-        this.omegaCmdYaw = omCmdYaw
         const tauNeedYaw = mp.I * K_OMEGA * (omCmdYaw - omYaw) - tauPassiveYaw
 
         // ---- roll axis — RCS only, no TVC/fin authority (6dof-spec.md §6) ----
@@ -1164,7 +1157,6 @@ export class RocketPhysicsEngine {
           this.attHoldRoll = 0
           omCmdRoll = Math.abs(this.rollInput) > 0.01 ? omCmdRoll : clamp(-K_THETA * 0, -OMEGA_MAX, OMEGA_MAX)
         }
-        this.omegaCmdRoll = omCmdRoll
         const tauNeedRoll = mp.Iyy * K_OMEGA * (omCmdRoll - omRoll)
 
         // control allocation for pitch/yaw: share demanded torque between
@@ -1253,8 +1245,6 @@ export class RocketPhysicsEngine {
         tauRcsOut[2] = tauRcsZ
       } else {
         this.omegaCmdPitch = 0
-        this.omegaCmdYaw = 0
-        this.omegaCmdRoll = 0
         gimCmdPitch = T > 1 ? this.pitchInput * GIMBAL_MAX : 0
         gimCmdYaw = T > 1 ? this.yawInput * GIMBAL_MAX : 0
         finCmdPitch = this.pitchInput * FIN_CTRL_MAX
@@ -1270,8 +1260,6 @@ export class RocketPhysicsEngine {
       }
     } else {
       this.omegaCmdPitch = 0
-      this.omegaCmdYaw = 0
-      this.omegaCmdRoll = 0
     }
 
     // gimbal actuators: first-order lag, rate limit, travel limit — per axis
@@ -1281,7 +1269,6 @@ export class RocketPhysicsEngine {
 
     const rateY = clamp((gimCmdYaw - this.gimbalYaw) / GIMBAL_TAU, -GIMBAL_RATE, GIMBAL_RATE)
     this.gimbalYaw = clamp(this.gimbalYaw + rateY * h, -GIMBAL_MAX, GIMBAL_MAX)
-    this.gimbalYawCmd = gimCmdYaw
 
     // control-fin actuators: same structure, faster, own travel limit
     const frateP = clamp((finCmdPitch - this.finPitch) / FIN_CTRL_TAU, -FIN_CTRL_RATE, FIN_CTRL_RATE)
@@ -1376,10 +1363,10 @@ export class RocketPhysicsEngine {
         : 'crashed'
     s[1] = 0; s[3] = 0; s[4] = 0; s[5] = 0
     s[10] = 0; s[11] = 0; s[12] = 0
-    this.gimbalPitch = 0; this.gimbalYaw = 0; this.gimbalCmd = 0; this.gimbalYawCmd = 0
+    this.gimbalPitch = 0; this.gimbalYaw = 0; this.gimbalCmd = 0
     this.finPitch = 0; this.finYaw = 0; this.tauRcs = [0, 0, 0]
     this.lastT = 0; this.lastMdot = 0; this.lastFrac = 0
-    this.omegaCmdPitch = 0; this.omegaCmdYaw = 0; this.omegaCmdRoll = 0
+    this.omegaCmdPitch = 0
   }
 
   // ───────────────────────── flight stage ─────────────────────────
