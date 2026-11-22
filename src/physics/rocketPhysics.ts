@@ -1178,7 +1178,7 @@ export class RocketPhysicsEngine {
           let fin = 0, tauFin = 0
           if (tvcAuth > 0) {
             gim = Math.asin(clamp(tauG / (T * arm), -sinMax, sinMax))
-            tauGim = T * Math.sin(gim) * arm
+            tauGim = -T * Math.sin(gim) * arm
           }
           if (finGain > 1e-9) {
             fin = clamp(tauF / finGain, -FIN_CTRL_MAX, FIN_CTRL_MAX)
